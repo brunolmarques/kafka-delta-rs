@@ -1,0 +1,16 @@
+name: Rust CI
+
+on:
+  push:
+    branches: ['main']
+    tags: [v*]
+  pull_request:
+    branches: ['main']     
+
+concurrency:
+  group: ${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  run-rust-ci-workflow:
+    uses: brunolmarques/gha-reusable-workflows/.github/workflows/rust-ci.yaml@v1.2.4
