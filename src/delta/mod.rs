@@ -30,9 +30,7 @@ impl DeltaWriter for DeltaRsWriter {
     }
 }
 
-
 //---------------------------------------- Tests ----------------------------------------
-
 
 #[cfg(test)]
 mod tests {

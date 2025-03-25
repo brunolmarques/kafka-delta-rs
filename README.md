@@ -154,6 +154,10 @@ concurrency:
   num_threads: 4
   retry_attempts: 3
 
+batch:
+  batch_interval: 100,           # In seconds
+  batch_size: 1000               # Max number of events
+
 credentials:
   kafka_username: "user"
   kafka_password: "pass"

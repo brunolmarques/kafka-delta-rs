@@ -5,9 +5,7 @@ pub fn init_logging(level: &str) {
     println!("Logging initialized at level: {}", level);
 }
 
-
 //---------------------------------------- Tests ----------------------------------------
-
 
 #[cfg(test)]
 mod tests {

@@ -4,19 +4,19 @@
 // and Delta table writing in a multi-threaded fashion (using Tokio for async and Rayon for parallel tasks).
 
 mod config;
-mod kafka;
-mod pipeline;
 mod delta;
+mod handlers;
+mod kafka;
 mod logging;
 mod monitoring;
-mod handlers;
+mod pipeline;
 
 use crate::config::load_config;
+use crate::delta::{DeltaRsWriter, DeltaWriter};
 use crate::kafka::{KafkaConsumer, RDKafkaConsumer};
-use crate::pipeline::consolidate_data;
-use crate::delta::{DeltaWriter, DeltaRsWriter};
 use crate::logging::init_logging;
 use crate::monitoring::init_monitoring;
+use crate::pipeline::consolidate_data;
 use std::env;
 
 #[tokio::main]
@@ -50,7 +50,9 @@ async fn main() {
         table_path: config.delta.table_path,
         partition: config.delta.partition,
     };
-    writer.insert(&consolidated_records).expect("Delta insert failed");
+    writer
+        .insert(&consolidated_records)
+        .expect("Delta insert failed");
 
     // The application may log successes, update Prometheus metrics, and schedule daily operations.
     println!("Operation completed successfully.");

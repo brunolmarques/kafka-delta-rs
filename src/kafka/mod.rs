@@ -26,9 +26,7 @@ impl KafkaConsumer for RDKafkaConsumer {
     }
 }
 
-
 //---------------------------------------- Tests ----------------------------------------
-
 
 #[cfg(test)]
 mod tests {

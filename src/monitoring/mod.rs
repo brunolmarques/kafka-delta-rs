@@ -5,9 +5,7 @@ pub fn init_monitoring(port: u16) {
     println!("Monitoring initialized on port: {}", port);
 }
 
-
 //---------------------------------------- Tests ----------------------------------------
-
 
 #[cfg(test)]
 mod tests {

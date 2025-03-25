@@ -11,9 +11,7 @@ pub fn consolidate_data(records: Vec<String>) -> Vec<String> {
     deduped
 }
 
-
 //---------------------------------------- Tests ----------------------------------------
-
 
 #[cfg(test)]
 mod tests {
@@ -21,11 +19,7 @@ mod tests {
 
     #[test]
     fn test_consolidation_deduplication() {
-        let data = vec![
-            "a".to_string(),
-            "b".to_string(),
-            "a".to_string(),
-        ];
+        let data = vec!["a".to_string(), "b".to_string(), "a".to_string()];
         let consolidated = consolidate_data(data);
         assert_eq!(consolidated, vec!["a".to_string(), "b".to_string()]);
     }

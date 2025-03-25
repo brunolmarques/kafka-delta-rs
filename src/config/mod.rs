@@ -41,7 +41,13 @@ pub struct MonitoringConfig {
 #[derive(Debug, Deserialize)]
 pub struct ConcurrencyConfig {
     pub thread_pool_size: Option<usize>, // None means unlimited
-    pub retry_attempts: Option<usize>, // None means no retries
+    pub retry_attempts: Option<usize>,   // None means no retries
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BatchConfig {
+    pub batch_interval: u64,           // in seconds
+    pub batch_size: usize,             // max number of events in a batch
 }
 
 // Function to load YAML config file
@@ -51,9 +57,7 @@ pub fn load_config(path: &str) -> Result<AppConfig, Box<dyn std::error::Error>> 
     Ok(config)
 }
 
-
 //---------------------------------------- Tests ----------------------------------------
-
 
 #[cfg(test)]
 mod tests {
@@ -80,6 +84,9 @@ monitoring:
 concurrency:
   thread_pool_size: 4
   retry_attempts: 3
+batch-config:
+  batch_size: 1000
+  batch_interval: 1000
         "#;
         let config: AppConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.kafka.broker, "localhost:9092");
