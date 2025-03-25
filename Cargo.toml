@@ -2,5 +2,43 @@
 name = "kafka-delta-rs"
 version = "0.1.0"
 edition = "2024"
+authors = ["Bruno Marques <bruno.lmarques@icloud.com>"]
+description = "Rust application to read from multiple Kafka topics, consolidate and deduplicate data, then write atomically into a Delta Lake table."
+
 
 [dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Async traits support
+async-trait = "0.1"
+
+# Serialization and YAML config
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+
+# Command-line argument parsing
+clap = { version = "4.5.32", features = ["derive"] }
+
+# Kafka client (using rdkafka)
+rdkafka = { version = "0.37", features = ["tokio"] }
+
+# Logging libraries
+log = "0.4"
+env_logger = "0.11.7"
+
+# Monitoring with Prometheus
+prometheus-client = "0.23.1"
+
+# Delta Lake integration using deltalake
+deltalake = "0.25.0"
+
+# Parallel processing with Rayon
+rayon = "1.5"
+
+# For error handling with custom error types
+thiserror = "2.0.12"
+
+[dev-dependencies]
+# Additional dependencies for testing (integration tests, etc.)
+tokio = { version = "1", features = ["full"] }

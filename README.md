@@ -1,10 +1,6 @@
-Below is a comprehensive `README.md` example for the **Kafka-Delta-Rust** project. It captures all critical details needed for developers and operators, following the best practices outlined in your instructions. Feel free to adjust sections or add more details as your project evolves.
-
----
-
 # Kafka-Delta-Rust
 
-Welcome to **Kafka-Delta-Rust**: a Rust-based application that reads data from multiple Kafka topics, consolidates and deduplicates records in parallel, and writes them daily into an existing Delta Lake table—partitioned by date—at scale. This project is designed with extensibility, reliability, and performance in mind, using **Tokio** for concurrency, **Rayon** for parallelization, and **delta-rs** for Delta Lake operations.
+Welcome to **Kafka-Delta-Rust**: a Rust-based application that reads data from a Kafka topic, consolidates and deduplicates records in parallel, and writes them daily into an existing Delta Lake table—partitioned by a specific column. This project is designed with extensibility, reliability, and performance in mind, using **Tokio** for concurrency, **Rayon** for parallelization, and **deltalake** for Delta Lake operations.
 
 ---
 
@@ -33,7 +29,7 @@ kafka-delta-rust/
 │   ├── pipeline/
 │   │   ├── mod.rs             # Traits for pipeline steps
 │   │   └── processor.rs       # Consolidation and deduplication logic
-│   ├── errors/
+│   ├── handlers/
 │   │   ├── mod.rs             # Traits for error handling
 │   │   └── types.rs           # Custom error types
 │   ├── logging/
@@ -41,13 +37,14 @@ kafka-delta-rust/
 │   │   └── prometheus.rs      # Prometheus integration
 │   └── utils.rs               # Utility functions, if needed
 └── tests/
-    ├── integration_test.rs     # Integration tests
-    └── ...                     # Additional integration test files
+    ├── integration.rs         # Integration tests
+    └── ...                    # Additional integration test files
 ```
 
 ---
 
 ## Table of Contents
+
 1. [Key Features](#key-features)
 2. [Architecture Overview](#architecture-overview)
 3. [Installation](#installation)
@@ -105,18 +102,22 @@ The general data flow is as follows:
 ### Steps
 
 1. **Clone this repository**:
+
    ```bash
    git clone https://github.com/brunolmarques/kafka-delta-rs.git
    cd kafka-delta-rust
    ```
 
 2. **Build the application**:
+
    ```bash
    cargo build --release
    ```
+
    The compiled binary will be located in `target/release/kafka-delta-rust`.
 
 3. **Optionally, build the Docker image**:
+
    ```bash
    docker build -t kafka-delta-rust:latest .
    ```
@@ -131,10 +132,8 @@ A sample `config.yaml` is provided in the repository. Here’s a snippet:
 
 ```yaml
 kafka:
-  brokers: "localhost:9092,localhost:9093"
-  topics:
-    - "topic_a"
-    - "topic_b"
+  broker: "localhost:9092"
+  topic: "topic_a"
   group_id: "kafka-delta-consumer-group"
   max_poll_records: 5000
 
@@ -145,7 +144,11 @@ delta:
 
 logging:
   level: "INFO"
-  prometheus_port: 9090
+
+monitoring:
+  host: "localhost"
+  port: 9090
+  endpoint: "/metrics"
 
 concurrency:
   num_threads: 4
@@ -170,11 +173,13 @@ This file can be overridden at runtime by specifying an alternative path via a C
 ## Usage
 
 1. **Run the binary directly**:
+
    ```bash
    ./target/release/kafka-delta-rust --config ./config.yaml
    ```
 
 2. **Run via Docker**:
+
    ```bash
    docker run \
        -v /path/to/config.yaml:/app/config.yaml \
@@ -205,18 +210,42 @@ Integrate these metrics into your existing Prometheus + Grafana stack to visuali
 
 1. **Unit Tests**:
    - Each module has corresponding **unit tests** in the same `.rs` file.
-   - Run with:
-     ```bash
-     cargo test --lib
-     ```
+   - Run all tests:
+   ```
+   cargo test
+   ```
+   - Run tests for a specific module (e.g., `config`):
+   ```
+   cargo test config
+   ```
+   - Run a specific test function (e.g., `test_load_config` in module `config`):
+   ```
+   cargo test config::tests::test_load_config
+   ```
+
 2. **Integration Tests**:
    - Found in the `tests/` directory, focusing on end-to-end scenarios (Kafka ingestion + Delta write).
    - Run with:
+   - (Placeholder: add integration test examples here.)
      ```bash
      cargo test --test integration_test
      ```
+
 3. **Continuous Integration**:
-   - Consider setting up GitHub Actions, GitLab CI, or similar to automatically run tests, lint checks, and security scans on each PR.
+   This project uses GitHub Actions for continuous integration. Everytime a new PR is pushed, the CI workflow will:
+
+   - Check code formatting using `cargo fmt -- --check`
+   - Lint the code using `cargo clippy`
+   - Execute tests using `cargo test`
+
+   To run these commands locally, use:
+
+   ```
+   cargo fmt -- --check
+   cargo clippy -- -D warnings
+   cargo test
+   ```
+
 
 ---
 
@@ -246,10 +275,8 @@ We welcome contributions! Please follow these steps:
 
 ## License
 
-This project is licensed under the [MIT License](./LICENSE). 
+This project is licensed under the [MIT License](./LICENSE).
 
 ---
 
 **Thank you for using Kafka-Delta-Rust!** If you have any questions, feel free to open an issue or submit a pull request. We aim to create a robust, extensible pipeline for near-real-time data processing from Kafka to Delta Lake in Rust.
-
-Happy coding!
