@@ -1,0 +1,37 @@
+# === General Ignored Files ===
+.DS_Store
+Thumbs.db
+
+# === Rust Build Artifacts ===
+/target/
+/**/*.rs.bk
+/**/*.rs.bak
+
+# === Intermediate Files ===
+*.log
+*.tmp
+*.lock
+
+# === Cargo and Build Files ===
+# Note: For library crates, Cargo.lock is often not committed.
+# For binary applications, Cargo.lock is typically committed to ensure consistent builds.
+# Uncomment below if you prefer ignoring Cargo.lock entirely.
+/Cargo.lock
+
+# === IDE/Editor Directories ===
+# IntelliJ / IDEA
+.idea/
+# Visual Studio Code
+.vscode/
+# Eclipse
+.settings/
+
+# === Docker and Other Containers ===
+/docker/
+.dockerignore
+
+# === Config & Credentials (Sensitive Files) ===
+# If you have a default config.yaml for references, commit config-sample.yaml instead.
+config.yaml
+*.secret
+*.credentials
