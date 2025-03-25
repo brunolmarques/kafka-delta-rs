@@ -161,6 +161,7 @@ batch:
 credentials:
   kafka_username: "user"
   kafka_password: "pass"
+  delta_credentials: "gcp"       # Credentials to the cloud/local storage
 
 # Additional config for advanced use cases ...
 ```

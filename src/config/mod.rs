@@ -50,6 +50,13 @@ pub struct BatchConfig {
     pub batch_size: usize,             // max number of events in a batch
 }
 
+#[derive(Debug, Deserialize)]
+pub struct CredentialsConfig {
+    pub kafka_username: String,
+    pub kafka_password: String,
+    pub delta_credentials: String,
+}
+
 // Function to load YAML config file
 pub fn load_config(path: &str) -> Result<AppConfig, Box<dyn std::error::Error>> {
     let content = std::fs::read_to_string(path)?;
