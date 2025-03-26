@@ -10,6 +10,8 @@ pub struct AppConfig {
     pub logging: LoggingConfig,
     pub monitoring: MonitoringConfig,
     pub concurrency: ConcurrencyConfig,
+    pub batch: BatchConfig,
+    pub credentials: CredentialsConfig,
 }
 
 #[derive(Debug, Deserialize)]
