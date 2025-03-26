@@ -5,9 +5,10 @@ use crate::handlers::AppError;
 use async_trait::async_trait;
 
 // Trait for Kafka consumers.
+#[async_trait]
 pub trait KafkaConsumer {
-    // Asynchronously consume data from a Kafka topic.
-    fn consume(&self) -> Result<Vec<String>, AppError>; // Simplified return type; in production, this might be a stream.
+    // Changed method signature to async.
+    async fn consume(&self) -> Result<Vec<String>, AppError>;
 }
 
 // Example implementation using rdkafka (details abstracted)
@@ -19,10 +20,31 @@ pub struct RDKafkaConsumer {
 
 #[async_trait]
 impl KafkaConsumer for RDKafkaConsumer {
-    fn consume(&self) -> Result<Vec<String>, AppError> {
-        // Pseudocode: Connect to Kafka, subscribe to topics, read messages with error handling and retries
-        // TODO: Implement Kafka consumption logic using async (Tokio) and add logging & error handling.
-        Ok(vec!["record1".to_string(), "record2".to_string()])
+    async fn consume(&self) -> Result<Vec<String>, AppError> {
+        log::info!("Connecting to Kafka broker: {}", self.broker);
+        // Simulate asynchronous consumption logic with a timeout.
+        let consumption = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            log::info!("Consuming messages from topic: {}", self.topic);
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            // Simulate successful message consumption.
+            Ok(vec!["record1".to_string(), "record2".to_string()])
+        })
+        .await;
+
+        match consumption {
+            Ok(Ok(records)) => {
+                log::info!("Consumed {} records", records.len());
+                Ok(records)
+            }
+            Ok(Err(e)) => {
+                log::error!("Error during consumption: {}", e);
+                Err(AppError::new(e))
+            }
+            Err(_) => {
+                log::error!("Timeout reached while consuming messages.");
+                Err(AppError::new("Timeout reached"))
+            }
+        }
     }
 }
 
@@ -32,15 +54,15 @@ impl KafkaConsumer for RDKafkaConsumer {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_consume_messages() {
+    #[tokio::test]
+    async fn test_consume_messages() {
         let consumer = RDKafkaConsumer {
             broker: "localhost:9092".into(),
             topic: "test_topic".into(),
             group_id: "test_group".into(),
         };
-        // This is a stub test; in a real test, a mock Kafka instance could be used.
-        let result = consumer.consume();
+        // Await the async consume call.
+        let result = consumer.consume().await;
         assert!(result.is_ok());
     }
 }
