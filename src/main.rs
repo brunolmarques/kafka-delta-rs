@@ -29,7 +29,7 @@ async fn main() {
     let config = load_config(&config_path).expect("Failed to load configuration");
 
     // Initialize logging and monitoring
-    init_logging(&config.logging.level);
+    init_logging(&config.logging);
     init_monitoring(config.monitoring.port);
 
     // Initialize Kafka consumer (this example uses a custom Kafka consumer implementation)

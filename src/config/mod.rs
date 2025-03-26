@@ -28,7 +28,7 @@ pub struct DeltaConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct LoggingConfig {
-    pub level: String,
+    pub level: String,    // Supported levels: "OFF", "ERROR", "WARN", "INFO", "DEBUG", "TRACE"
 }
 
 #[derive(Debug, Deserialize)]

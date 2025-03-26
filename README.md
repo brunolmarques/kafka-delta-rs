@@ -140,10 +140,10 @@ kafka:
 delta:
   table_path: "/path/to/delta-table"
   partition_column: "date_col"
-  mode: "INSERT"  # or "MERGE"
+  mode: "INSERT"                 # or "MERGE"
 
 logging:
-  level: "INFO"
+  level: "INFO"                  # Supported levels: "OFF", "ERROR", "WARN", "INFO", "DEBUG", "TRACE"
 
 monitoring:
   host: "localhost"
