@@ -1,8 +1,15 @@
-// This module handles consuming messages from Kafka topics (with replicas) using a Rust Kafka crate (e.g., rdkafka)
+// This module handles consuming messages from Kafka topics (with replicas) using a Rust Kafka crate (rdkafka)
 // It implements a trait for the Kafka consumer functionality and includes error handling for connection/network issues.
-
-use crate::handlers::AppError;
+use rdkafka::{config::ClientConfig, consumer::StreamConsumer};
+use rdkafka::consumer::Consumer;
 use async_trait::async_trait;
+use std::sync::Arc;
+use anyhow::Result;
+
+use crate::config::AppConfig;
+use crate::pipeline::Pipeline;
+use crate::{config::KafkaConfig, handlers::AppError};
+
 
 // Trait for Kafka consumers.
 #[async_trait]
@@ -11,25 +18,46 @@ pub trait KafkaConsumer {
     async fn consume(&self) -> Result<Vec<String>, AppError>;
 }
 
-// Example implementation using rdkafka (details abstracted)
-pub struct RDKafkaConsumer {
-    pub broker: String,
-    pub topic: String,
-    pub group_id: String,
+
+pub struct KafkaConsumer {
+    consumer: StreamConsumer,
+    pipeline: Arc<Pipeline>,
+    max_wait_secs: u64,
+    max_buffer_size: usize,
+}
+
+impl KafkaConsumer {
+    pub fn new(app_config: &AppConfig) -> Self {
+        Self {
+            broker: app_config.kafka.broker.clone(),
+            topics: app_config.kafka.topics.clone(),
+            group_id: app_config.kafka.group_id.clone(),
+        }
+    }
 }
 
 #[async_trait]
 impl KafkaConsumer for RDKafkaConsumer {
     async fn consume(&self) -> Result<Vec<String>, AppError> {
         log::info!("Connecting to Kafka broker: {}", self.broker);
+        
+        // Create the `StreamConsumer`, to receive the messages from the topic in form of a `Stream`.
+        let consumer: StreamConsumer = ClientConfig::new()
+            .set("group.id", &self.group_id)
+            .set("bootstrap.servers", &self.broker)
+            .set("enable.partition.eof", "false")
+            .set("session.timeout.ms", "6000")
+            .set("enable.auto.commit", "false")  // Offsets will be committed manually
+            .create()
+            .map_err(|e| AppError::ConnectionError(e.to_string()))?;
+        
+
+        log::info!("Consuming messages from topic: {}", self.topic);
+        
         // Simulate asynchronous consumption logic with a timeout.
-        let consumption = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            log::info!("Consuming messages from topic: {}", self.topic);
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            // Simulate successful message consumption.
-            Ok(vec!["record1".to_string(), "record2".to_string()])
-        })
-        .await;
+        consumer
+            .subscribe(&[&self.topic])
+            .map_err(|e| AppError::ConsumptionError(e.to_string()))?;
 
         match consumption {
             Ok(Ok(records)) => {
@@ -38,11 +66,11 @@ impl KafkaConsumer for RDKafkaConsumer {
             }
             Ok(Err(e)) => {
                 log::error!("Error during consumption: {}", e);
-                Err(AppError::new(e))
+                Err(AppError::ConsumptionError(e))
             }
             Err(_) => {
                 log::error!("Timeout reached while consuming messages.");
-                Err(AppError::new("Timeout reached"))
+                Err(AppError::ConnectionError("Timeout reached".to_string()))
             }
         }
     }

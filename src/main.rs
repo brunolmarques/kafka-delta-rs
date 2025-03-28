@@ -35,7 +35,7 @@ async fn main() {
     // Initialize Kafka consumer (this example uses a custom Kafka consumer implementation)
     let consumer = RDKafkaConsumer {
         broker: config.kafka.broker,
-        topic: config.kafka.topic,
+        topic: config.kafka.topics,
         group_id: config.kafka.group_id,
     };
 
