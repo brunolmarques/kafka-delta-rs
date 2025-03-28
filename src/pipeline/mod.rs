@@ -95,7 +95,7 @@ impl Pipeline {
         let aggregator = self.aggregator.clone();
 
         log::debug!("Inserting record: {:?}", record);
-        
+
         task::spawn_blocking(move || {
             let mut agg = aggregator.lock().map_err(|_| {
                 log::error!("insert_record: Failed to acquire aggregator lock");
@@ -107,7 +107,7 @@ impl Pipeline {
         .map_err(|e| {
             PipelineError::InsertError(format!("Aggregator insertion task panicked: {e}"))
         })??;
-        
+
         log::debug!("Record inserted successfully");
 
         Ok(())
@@ -168,11 +168,106 @@ impl Pipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio;
+
+    #[tokio::test]
+    async fn test_insert_record_unique() {
+        let pipeline = Pipeline::new("dummy".to_string());
+        let res = pipeline
+            .insert_record(1, Some("a".to_string()), "payload1".to_string())
+            .await;
+        assert!(res.is_ok());
+        assert_eq!(pipeline.aggregator_len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_insert_record_duplicate_offset() {
+        let pipeline = Pipeline::new("dummy".to_string());
+        assert!(
+            pipeline
+                .insert_record(1, Some("a".to_string()), "payload1".to_string())
+                .await
+                .is_ok()
+        );
+        let res = pipeline
+            .insert_record(1, Some("b".to_string()), "payload2".to_string())
+            .await;
+        assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_insert_record_duplicate_key() {
+        let pipeline = Pipeline::new("dummy".to_string());
+        assert!(
+            pipeline
+                .insert_record(1, Some("a".to_string()), "payload1".to_string())
+                .await
+                .is_ok()
+        );
+        let res = pipeline
+            .insert_record(2, Some("a".to_string()), "payload2".to_string())
+            .await;
+        assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_flush_empy_the_aggregator() {
+        let pipeline = Pipeline::new("dummy".to_string());
+        pipeline
+            .insert_record(1, Some("a".to_string()), "payload1".to_string())
+            .await
+            .unwrap();
+        pipeline
+            .insert_record(2, Some("b".to_string()), "payload2".to_string())
+            .await
+            .unwrap();
+        assert_eq!(pipeline.aggregator_len(), 2);
+
+        assert!(pipeline.flush().await.is_ok());
+        assert_eq!(pipeline.aggregator_len(), 0);
+    }
+
+    // Non-asynchronous tests for InMemoryAggregator
+    #[test]
+    fn test_inmemory_aggregator_insert_and_len() {
+        let mut aggregator = InMemoryAggregator::new();
+        let record = MessageRecord {
+            offset: 1,
+            key: Some("a".to_string()),
+            payload: "payload".to_string(),
+        };
+        assert!(aggregator.insert(record).is_ok());
+        assert_eq!(aggregator.len(), 1);
+
+        // Test duplicate offset insertion
+        let dup_offset = MessageRecord {
+            offset: 1,
+            key: Some("b".to_string()),
+            payload: "payload2".to_string(),
+        };
+        assert!(aggregator.insert(dup_offset).is_err());
+    }
 
     #[test]
-    fn test_consolidation_deduplication() {
-        let data = vec!["a".to_string(), "b".to_string(), "a".to_string()];
-        let consolidated = consolidate_data(data);
-        assert_eq!(consolidated, vec!["a".to_string(), "b".to_string()]);
+    fn test_inmemory_aggregator_drain() {
+        let mut aggregator = InMemoryAggregator::new();
+        let record1 = MessageRecord {
+            offset: 1,
+            key: Some("a".to_string()),
+            payload: "payload1".to_string(),
+        };
+        let record2 = MessageRecord {
+            offset: 2,
+            key: Some("b".to_string()),
+            payload: "payload2".to_string(),
+        };
+        aggregator.insert(record1).unwrap();
+        aggregator.insert(record2).unwrap();
+        assert_eq!(aggregator.len(), 2);
+
+        let drained = aggregator.drain();
+        assert_eq!(drained.len(), 2);
+        // After draining, aggregator should be empty
+        assert_eq!(aggregator.len(), 0);
     }
 }
