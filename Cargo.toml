@@ -9,6 +9,7 @@ description = "Rust application to read from multiple Kafka topics, consolidate 
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+futures = "0.3.31"
 
 # Async traits support
 async-trait = "0.1"
@@ -38,7 +39,6 @@ rayon = "1.5"
 
 # For error handling with custom error types
 thiserror = "2.0.12"
-anyhow = "1.0.0"
 
 [dev-dependencies]
 # Additional dependencies for testing (integration tests, etc.)

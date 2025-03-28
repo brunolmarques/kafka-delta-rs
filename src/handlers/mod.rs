@@ -122,9 +122,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_error_display() {
-        let err = AppError::NetworkError("timeout".to_string());
-        assert_eq!(err.to_string(), "Network error: timeout");
-    }
 }

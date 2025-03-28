@@ -13,7 +13,7 @@ pub struct AppConfig {
     pub logging: LoggingConfig,
     pub monitoring: MonitoringConfig,
     pub concurrency: ConcurrencyConfig,
-    pub batch: PipelineConfig,
+    pub pipeline: PipelineConfig,
     pub credentials: CredentialsConfig,
 }
 
@@ -22,7 +22,7 @@ pub struct KafkaConfig {
     pub broker: String,
     pub topics: Vec<String>,
     pub group_id: String,
-    pub timeout: Option<u64>, // Optional timeout for Kafka operations
+    pub timeout: Option<u64>, // Optional: timeout for Kafka operations, default is 5000ms
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,7 +67,7 @@ pub struct CredentialsConfig {
 impl AppConfig {
     pub fn load_config<P: AsRef<Path>>(path: P) -> AppResult<Self> {
         log::info!("Loading configuration file: {:?}", path.as_ref());
-        let content = std::fs::read_to_string(path).map_err(|e| {
+        let content = std::fs::read_to_string(&path).map_err(|e| {
             log::error!(
                 "Failed to read configuration file {:?}: {}",
                 path.as_ref(),
@@ -108,6 +108,18 @@ impl AppConfig {
         if config.delta.partition.is_empty() {
             log::error!("Invalid config: delta.partition is empty");
             return Err(ConfigError::InvalidField("delta.partition is empty".to_string()).into());
+        }
+
+        if config.pipeline.max_buffer_size.is_none() || config.pipeline.max_buffer_size.unwrap() < 1 {
+            log::warn!("Warning: max_buffer_size is not set or is less than 1. Defaulting to 10000.");
+        }
+
+        if config.pipeline.max_wait_secs.is_none() || config.pipeline.max_wait_secs.unwrap() < 1 {
+            log::warn!("Warning: max_wait_secs is not set or is less than 1. Defaulting to 360 seconds.");
+        }
+
+        if config.kafka.timeout.is_none() {
+            log::warn!("Warning: kafka.timeout is not set. Defaulting to 5000ms.");
         }
 
         log::info!("Configuration file loaded successfully");
