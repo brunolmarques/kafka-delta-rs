@@ -4,7 +4,8 @@
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use tokio::task;
+use async_trait::async_trait;
+use tokio::task; // added for async trait support
 
 use crate::handlers::PipelineError::{FlushError, InsertError};
 use crate::handlers::{AppResult, PipelineError};
@@ -79,9 +80,29 @@ impl Pipeline {
             table_uri,
         }
     }
+}
 
+#[async_trait]
+pub trait PipelineTrait {
+    // Asynchronously insert a record into the pipeline
+    async fn insert_record(
+        &self,
+        offset: i64,
+        key: Option<String>,
+        payload: String,
+    ) -> AppResult<()>;
+    
+    // Asynchronously flush the pipeline data
+    async fn flush(&self) -> AppResult<()>;
+    
+    // Returns the count of aggregated records
+    fn aggregator_len(&self) -> usize;
+}
+
+#[async_trait]
+impl PipelineTrait for Pipeline {
     /// Asynchronously insert a record into aggregator
-    pub async fn insert_record(
+    async fn insert_record(
         &self,
         offset: i64,
         key: Option<String>,
@@ -114,7 +135,7 @@ impl Pipeline {
     }
 
     /// Flush aggregator data
-    pub async fn flush(&self) -> AppResult<()> {
+    async fn flush(&self) -> AppResult<()> {
         let aggregator = self.aggregator.clone();
 
         log::info!("Flushing aggregator data…");
@@ -157,7 +178,7 @@ impl Pipeline {
         Ok(())
     }
 
-    pub fn aggregator_len(&self) -> usize {
+    fn aggregator_len(&self) -> usize {
         let agg = self.aggregator.lock().unwrap(); // In practice, handle PoisonError
         agg.len()
     }

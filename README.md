@@ -18,23 +18,17 @@ kafka-delta-rust/
 ├── src/
 │   ├── main.rs                # Entry point (handles CLI arguments, config parsing)
 │   ├── config/
-│   │   ├── mod.rs             # Traits and shared items for config
-│   │   └── loader.rs          # YAML parsing and config struct definitions
+│   │   ├── mod.rs             # YAML parsing and config struct definitions
 │   ├── kafka/
-│   │   ├── mod.rs             # Traits relevant to Kafka interaction
-│   │   └── consumer.rs        # Kafka consumer implementation
+│   │   ├── mod.rs             # Kafka consumer implementation
 │   ├── delta/
-│   │   ├── mod.rs             # Traits for Delta Lake
-│   │   └── writer.rs          # Logic for writing/merging data into Delta tables
+│   │   ├── mod.rs             # Logic for writing/merging data into Delta tables
 │   ├── pipeline/
-│   │   ├── mod.rs             # Traits for pipeline steps
-│   │   └── processor.rs       # Consolidation and deduplication logic
+│   │   ├── mod.rs             # Buffer consolidation and deduplication logic
 │   ├── handlers/
-│   │   ├── mod.rs             # Traits for error handling
-│   │   └── types.rs           # Custom error types
+│   │   ├── mod.rs             # Custom error types
 │   ├── logging/
-│   │   ├── mod.rs             # Traits for logging
-│   │   └── prometheus.rs      # Prometheus integration
+│   │   ├── mod.rs             # Prometheus integration
 │   └── utils.rs               # Utility functions, if needed
 └── tests/
     ├── integration.rs         # Integration tests

@@ -8,8 +8,8 @@ description = "Rust application to read from multiple Kafka topics, consolidate 
 
 [dependencies]
 # Async runtime
-tokio = { version = "1", features = ["full"] }
-futures = "0.3.31"
+tokio = { version = "1.44", features = ["full"] }
+futures = "0.3"
 
 # Async traits support
 async-trait = "0.1"
@@ -19,27 +19,29 @@ serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
 
 # Command-line argument parsing
-clap = { version = "4.5.32", features = ["derive"] }
+clap = { version = "4.5", features = ["derive"] }
 
 # Kafka client (using rdkafka)
 rdkafka = { version = "0.37", features = ["tokio"] }
 
 # Logging libraries
 log = "0.4"
-env_logger = "0.11.7"
+env_logger = "0.11"
 
-# Monitoring with Prometheus
-prometheus-client = "0.23.1"
+# Monitoring
+opentelemetry = { version = "0.29", features = ["metrics"] }
+opentelemetry_sdk = { version = "0.29", features = ["metrics", "rt-tokio"] }
+opentelemetry-stdout = { workspace = true, features = ["metrics"] }
 
 # Delta Lake integration using deltalake
-deltalake = "0.25.0"
+deltalake = "0.25"
 
 # Parallel processing with Rayon
 rayon = "1.5"
 
 # For error handling with custom error types
-thiserror = "2.0.12"
+thiserror = "2.0"
 
 [dev-dependencies]
 # Additional dependencies for testing (integration tests, etc.)
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1.44", features = ["full"] }
