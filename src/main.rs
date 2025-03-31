@@ -12,13 +12,16 @@ mod monitoring;
 mod pipeline;
 
 use std::env;
+use std::sync::Arc;
+use tokio::main;
 
 use crate::handlers::{AppError, AppResult};
 use crate::config::AppConfig;
 use crate::pipeline::Pipeline;
 use crate::kafka::KafkaConsumer;
-use std::sync::Arc;
-use tokio::main;
+use crate::logging::init_logging;
+use crate::monitoring::Monitoring;
+
 
 #[tokio::main]
 async fn main() {
@@ -36,31 +39,17 @@ async fn run() -> Result<(), AppError> {
     let app_config = AppConfig::load_config(config_file)?;
 
 
-    // Initialize logging and monitoring
-    init_logging(&config.logging);
-    init_monitoring(config.monitoring.port);
+    // 2) Initialize logging and monitoring
+    init_logging(&app_config.logging);
+    let monitoring = Monitoring::init(&app_config.monitoring)?;
 
-    // Initialize Kafka consumer (this example uses a custom Kafka consumer implementation)
-    let consumer = RDKafkaConsumer {
-        broker: config.kafka.broker,
-        topic: config.kafka.topics,
-        group_id: config.kafka.group_id,
-    };
+    // 3) Initialize the pipeline
+    let pipeline = Arc::new(Pipeline::new(&app_config.delta, Some(&monitoring)));
 
-    // Consume messages (in production, you might spawn tasks for each topic and perform retries)
-    let records = consumer.consume().expect("Failed to consume messages");
+    // 4) Initialize Kafka consumer 
+    let consumer = KafkaConsumer::new(&app_config, pipeline,Some(&monitoring))?;
 
-    // Consolidate and deduplicate records (parallelized using Rayon inside the function)
-    let consolidated_records = pipeline::consolidate_data(records);
-
-    // Write the consolidated data to the Delta table (atomic operation)
-    let writer = DeltaRsWriter {
-        table_path: config.delta.table_path,
-        partition: config.delta.partition,
-    };
-    writer
-        .insert(&consolidated_records)
-        .expect("Delta insert failed");
+    // TODO: finish implementing the run method
 
     // The application may log successes, update Prometheus metrics, and schedule daily operations.
     println!("Operation completed successfully.");

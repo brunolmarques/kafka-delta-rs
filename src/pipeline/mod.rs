@@ -1,14 +1,15 @@
 // This module consolidates data from multiple Kafka sources,
 // deduplicates them in parallel, and prepares atomic daily batches.
 // It also implements recovery if a crash occurs (e.g., by reading checkpoints).
+use async_trait::async_trait;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
-
-use async_trait::async_trait;
 use tokio::task; // added for async trait support
 
+use crate::config::DeltaConfig;
 use crate::handlers::PipelineError::{FlushError, InsertError};
-use crate::handlers::{AppResult, PipelineError};
+use crate::handlers::{AppError, AppResult, DeltaError, PipelineError};
+use crate::monitoring::Monitoring;
 
 #[derive(Debug, Clone)]
 pub struct MessageRecord {
@@ -23,6 +24,7 @@ struct InMemoryAggregator {
     records: BTreeMap<i64, MessageRecord>,
     seen_offsets: HashSet<i64>,
     seen_keys: HashSet<String>,
+    counter: usize, // new counter field
 }
 
 impl InMemoryAggregator {
@@ -31,6 +33,7 @@ impl InMemoryAggregator {
             records: BTreeMap::new(),
             seen_offsets: HashSet::new(),
             seen_keys: HashSet::new(),
+            counter: 0, // initialize counter
         }
     }
 
@@ -50,6 +53,7 @@ impl InMemoryAggregator {
             self.seen_keys.insert(k.clone());
         }
         self.records.insert(record.offset, record);
+        self.counter += 1; // increment counter after successful insert
 
         Ok(())
     }
@@ -59,25 +63,28 @@ impl InMemoryAggregator {
         self.records.clear();
         self.seen_offsets.clear();
         self.seen_keys.clear();
+        self.counter = 0; // reset counter after draining
         batch
     }
 
     fn len(&self) -> usize {
-        self.records.len()
+        self.counter // return the maintained counter
     }
 }
 
 /// Wraps aggregator & flush logic
-pub struct Pipeline {
+pub struct Pipeline<'a> {
     aggregator: Arc<Mutex<InMemoryAggregator>>,
-    table_uri: String,
+    delta_config: &'a DeltaConfig,
+    monitoring: Option<&'a Monitoring>,     // TODO: Implement monitoring
 }
 
-impl Pipeline {
-    pub fn new(table_uri: String) -> Self {
+impl<'a> Pipeline<'a> {
+    pub fn new(delta_config: &'a DeltaConfig, monitoring: Option<&'a Monitoring>) -> Self {
         Self {
             aggregator: Arc::new(Mutex::new(InMemoryAggregator::new())),
-            table_uri,
+            delta_config,
+            monitoring,
         }
     }
 }
@@ -91,16 +98,16 @@ pub trait PipelineTrait {
         key: Option<String>,
         payload: String,
     ) -> AppResult<()>;
-    
+
     // Asynchronously flush the pipeline data
     async fn flush(&self) -> AppResult<()>;
-    
+
     // Returns the count of aggregated records
     fn aggregator_len(&self) -> usize;
 }
 
 #[async_trait]
-impl PipelineTrait for Pipeline {
+impl<'a> PipelineTrait for Pipeline<'a> {
     /// Asynchronously insert a record into aggregator
     async fn insert_record(
         &self,
@@ -158,7 +165,7 @@ impl PipelineTrait for Pipeline {
         log::info!(
             "Writing {} records to Delta table at {}…",
             batch.len(),
-            self.table_uri
+            self.delta_config.table_path.clone()
         );
 
         // TODO: Implement Delta table writing logic here
@@ -166,12 +173,12 @@ impl PipelineTrait for Pipeline {
         // If an error happens, you can do:
         //   return Err(PipelineError::FlushError("Delta I/O failed: ...".into()));
 
-        for r in batch {
-            println!(
-                "Offset={}, Key={:?}, Payload={}",
-                r.offset, r.key, r.payload
-            );
-        }
+        // for r in batch {
+        //     println!(
+        //         "Offset={}, Key={:?}, Payload={}",
+        //         r.offset, r.key, r.payload
+        //     );
+        // }
 
         log::info!("Flush completed.");
 
@@ -180,7 +187,7 @@ impl PipelineTrait for Pipeline {
 
     fn aggregator_len(&self) -> usize {
         let agg = self.aggregator.lock().unwrap(); // In practice, handle PoisonError
-        agg.len()
+        agg.len() 
     }
 }
 
@@ -191,9 +198,19 @@ mod tests {
     use super::*;
     use tokio;
 
+    // Add helper for creating a pipeline instance with default config used in tests
+    fn create_pipeline() -> Pipeline<'static> {
+        let config = Box::leak(Box::new(DeltaConfig {
+            table_path: "dummy".to_string(),
+            mode: "default".to_string(),
+            partition: "default".to_string(),
+        }));
+        Pipeline::new(config, None)
+    }
+
     #[tokio::test]
     async fn test_insert_record_unique() {
-        let pipeline = Pipeline::new("dummy".to_string());
+        let pipeline = create_pipeline();
         let res = pipeline
             .insert_record(1, Some("a".to_string()), "payload1".to_string())
             .await;
@@ -203,7 +220,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_insert_record_duplicate_offset() {
-        let pipeline = Pipeline::new("dummy".to_string());
+        let pipeline = create_pipeline();
         assert!(
             pipeline
                 .insert_record(1, Some("a".to_string()), "payload1".to_string())
@@ -218,7 +235,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_insert_record_duplicate_key() {
-        let pipeline = Pipeline::new("dummy".to_string());
+        let pipeline = create_pipeline();
         assert!(
             pipeline
                 .insert_record(1, Some("a".to_string()), "payload1".to_string())
@@ -233,7 +250,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_flush_empy_the_aggregator() {
-        let pipeline = Pipeline::new("dummy".to_string());
+        let pipeline = create_pipeline();
         pipeline
             .insert_record(1, Some("a".to_string()), "payload1".to_string())
             .await

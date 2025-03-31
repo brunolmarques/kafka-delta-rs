@@ -39,8 +39,11 @@ pub struct LoggingConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct MonitoringConfig {
-    pub host: String,
-    pub port: u16,
+    /// Whether or not monitoring is enabled
+    pub enabled: bool,
+    pub service_name: String,
+
+    /// Pull-based endpoint for metrics
     pub endpoint: String, // e.g., "/metrics"
 }
 
@@ -120,6 +123,11 @@ impl AppConfig {
 
         if config.kafka.timeout.is_none() {
             log::warn!("Warning: kafka.timeout is not set. Defaulting to 5000ms.");
+        }
+
+        if config.monitoring.enabled && config.monitoring.endpoint.is_empty() {
+            log::error!("Invalid config: monitoring.endpoint is empty");
+            return Err(ConfigError::InvalidField("monitoring.endpoint is empty".to_string()).into());
         }
 
         log::info!("Configuration file loaded successfully");

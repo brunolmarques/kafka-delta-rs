@@ -4,24 +4,26 @@ use futures::StreamExt;
 use rdkafka::consumer::{CommitMode, Consumer, StreamConsumer};
 use rdkafka::error::KafkaError as RdKafkaError;
 use rdkafka::message::Message;
-use rdkafka::{ClientConfig, message::BorrowedMessage};
+use rdkafka::ClientConfig;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::config::AppConfig;
 use crate::handlers::{AppError, AppResult, KafkaError};
-use crate::pipeline::{Pipeline, PipelineTrait};
+use crate::pipeline::PipelineTrait;
+use crate::monitoring::Monitoring;
 
 
-pub struct KafkaConsumer<T: PipelineTrait> {
+pub struct KafkaConsumer<'a, T: PipelineTrait> {
     consumer: StreamConsumer,
     pipeline: Arc<T>,
     max_wait_secs: u64,
     max_buffer_size: usize,
+    monitoring: Option<&'a Monitoring>,
 }
 
-impl<T: PipelineTrait> KafkaConsumer<T> {
-    pub fn new(app_config: &AppConfig, pipeline: Arc<T>) -> AppResult<Self> {
+impl<'a, T: PipelineTrait> KafkaConsumer<'a, T> {
+    pub fn new(app_config: &AppConfig, pipeline: Arc<T>, monitoring: Option<&'a Monitoring>) -> AppResult<Self> {
         let consumer: StreamConsumer = ClientConfig::new()
             .set("bootstrap.servers", &app_config.kafka.broker)
             .set("group.id", &app_config.kafka.group_id)
@@ -52,6 +54,7 @@ impl<T: PipelineTrait> KafkaConsumer<T> {
             pipeline,
             max_wait_secs,
             max_buffer_size,
+            monitoring,
         })
     }
 
@@ -62,8 +65,13 @@ impl<T: PipelineTrait> KafkaConsumer<T> {
         while let Some(msg_result) = stream.next().await {
             match msg_result {
                 Ok(borrowed_msg) => {
+                    let size = &borrowed_msg.payload().map(|p| p.len() as u64).unwrap_or(0);
                     self.handle_message(borrowed_msg).await?;
-                }
+                    if let Some(monitoring) = &self.monitoring {
+                        monitoring.record_kafka_messages_read(1);
+                        monitoring.record_kafka_messages_size(*size);
+                    };
+                },
                 Err(e) => {
                     log::error!("Kafka read error: {:?}", e);
                     // Turn rdkafka::error::KafkaError into application custom error
@@ -89,6 +97,10 @@ impl<T: PipelineTrait> KafkaConsumer<T> {
                             "Commit failed: {e}"
                         )))
                     })?;
+                if let Some(monitoring) = &self.monitoring {
+                    monitoring.record_kafka_commit();
+                }
+                log::info!("Flushed and committed successfully.");
                 last_flush = Instant::now();
             }
         }
@@ -235,6 +247,7 @@ mod tests {
             pipeline: dummy_pipeline.clone(),
             max_wait_secs: 360,
             max_buffer_size: 10000,
+            monitoring: None,
         };
         let msg = DummyMessage::new(42, Some(b"test_key"), Some("test_payload"));
         consumer.handle_message(msg).await.unwrap();
@@ -254,6 +267,7 @@ mod tests {
             pipeline: dummy_pipeline.clone(),
             max_wait_secs: 360,
             max_buffer_size: 10000,
+            monitoring: None,
         };
         // Simulate a message with no payload.
         let msg = DummyMessage::new(43, None, None);
@@ -264,21 +278,5 @@ mod tests {
         assert_eq!(*offset, 43);
         assert!(key.is_none());
         assert_eq!(payload, "");
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn test_consume_messages() {
-        // Existing integration test remains unchanged but marked ignored
-        // to avoid requiring a live Kafka broker during unit testing.
-        let consumer = KafkaConsumer {
-            // Dummy consumer for test; real connection is not established.
-            consumer: unsafe { std::mem::zeroed() },
-            pipeline: Arc::new(DummyPipeline::new()),
-            max_wait_secs: 360,
-            max_buffer_size: 10000,
-        };
-        // ...existing test implementation...
-        // Here, you would call consumer.run().await and assert outcomes.
     }
 }

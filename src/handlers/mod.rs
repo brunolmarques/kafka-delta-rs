@@ -47,6 +47,16 @@ pub enum DeltaError {
     TableError(String),
 }
 
+/// Errors related to monitoring and telemetry
+#[derive(Error, Debug)]
+pub enum MonitoringError {
+    #[error("Telemetry endpoint error: {0}")]
+    ExporterError(String),
+
+    #[error("Telemetry shutdown error: {0}")]
+    ShutdownError(String),
+}
+
 /// A top-level application error enum combining sub-errors
 #[derive(Error, Debug)]
 pub enum AppError {
@@ -62,6 +72,9 @@ pub enum AppError {
     #[error("Delta error: {0}")]
     Delta(#[from] DeltaError),
 
+    #[error("Telemetry error: {0}")]
+    Monitoring(#[from] MonitoringError),
+
     #[error("Other error: {0}")]
     Other(String),
 }
@@ -69,7 +82,9 @@ pub enum AppError {
 /// A specialized result type for our application
 pub type AppResult<T> = std::result::Result<T, AppError>;
 
+
 //---------------------------------------- Tests ----------------------------------------
+
 
 #[cfg(test)]
 mod tests {
