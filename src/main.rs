@@ -11,49 +11,46 @@ mod logging;
 mod monitoring;
 mod pipeline;
 
-use crate::config::load_config;
-use crate::delta::{DeltaRsWriter, DeltaWriter};
-use crate::kafka::{KafkaConsumer, RDKafkaConsumer};
-use crate::logging::init_logging;
-use crate::monitoring::init_monitoring;
-use crate::pipeline::consolidate_data;
 use std::env;
+use std::sync::Arc;
+use tokio::main;
+
+use crate::config::AppConfig;
+use crate::handlers::{AppError, AppResult};
+use crate::kafka::KafkaConsumer;
+use crate::logging::init_logging;
+use crate::monitoring::Monitoring;
+use crate::pipeline::Pipeline;
 
 #[tokio::main]
 async fn main() {
-    // Parse command line arguments (example: config file path, override topic, table destination, thread pool size)
+    if let Err(e) = run().await {
+        eprintln!("Application error: {:?}", e);
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> Result<(), AppError> {
     let args: Vec<String> = env::args().collect();
-    let config_path = args.get(1).unwrap_or(&"config.yaml".to_string()).clone();
+    let config_file = args.get(1).map(|s| s.as_str()).unwrap_or("my_config.yaml");
 
-    // Load configuration from YAML file
-    let config = load_config(&config_path).expect("Failed to load configuration");
+    // 1) Load config
+    let app_config = AppConfig::load_config(config_file)?;
 
-    // Initialize logging and monitoring
-    init_logging(&config.logging);
-    init_monitoring(config.monitoring.port);
+    // 2) Initialize logging and monitoring
+    init_logging(&app_config.logging);
+    let monitoring = Monitoring::init(&app_config.monitoring)?;
 
-    // Initialize Kafka consumer (this example uses a custom Kafka consumer implementation)
-    let consumer = RDKafkaConsumer {
-        broker: config.kafka.broker,
-        topic: config.kafka.topic,
-        group_id: config.kafka.group_id,
-    };
+    // 3) Initialize the pipeline
+    let pipeline = Arc::new(Pipeline::new(&app_config.delta, Some(&monitoring)));
 
-    // Consume messages (in production, you might spawn tasks for each topic and perform retries)
-    let records = consumer.consume().expect("Failed to consume messages");
+    // 4) Initialize Kafka consumer
+    let consumer = KafkaConsumer::new(&app_config, pipeline, Some(&monitoring))?;
 
-    // Consolidate and deduplicate records (parallelized using Rayon inside the function)
-    let consolidated_records = pipeline::consolidate_data(records);
-
-    // Write the consolidated data to the Delta table (atomic operation)
-    let writer = DeltaRsWriter {
-        table_path: config.delta.table_path,
-        partition: config.delta.partition,
-    };
-    writer
-        .insert(&consolidated_records)
-        .expect("Delta insert failed");
+    // TODO: finish implementing the run method
 
     // The application may log successes, update Prometheus metrics, and schedule daily operations.
     println!("Operation completed successfully.");
+
+    Ok(())
 }

@@ -1,27 +1,86 @@
 // Custom error definitions for the application.
-// Use this module to wrap errors from network, connection, and schema issues.
-use std::fmt;
+use thiserror::Error;
 
-#[derive(Debug)]
+/// Errors related to configuration (YAML parsing, invalid fields, etc.)
+#[derive(Error, Debug)]
+pub enum ConfigError {
+    #[error("Failed to read or parse configuration file: {0}")]
+    ReadError(String),
+
+    #[error("Missing or invalid configuration field: {0}")]
+    InvalidField(String),
+}
+
+/// Errors related to Kafka operations
+#[derive(Error, Debug)]
+pub enum KafkaError {
+    #[error("Error connecting to Kafka broker: {0}")]
+    BrokerConnection(String),
+
+    #[error("Error reading from Kafka: {0}")]
+    ReadError(String),
+
+    #[error("Kafka communication lost: {0}")]
+    CommunicationLost(String),
+
+    #[error("Kafka timeout occurred: {0}")]
+    Timeout(String),
+}
+
+/// Errors related to the data pipeline/aggregator
+#[derive(Error, Debug)]
+pub enum PipelineError {
+    #[error("Failed to insert record into aggregator: {0}")]
+    InsertError(String),
+
+    #[error("Failed to flush aggregator: {0}")]
+    FlushError(String),
+}
+
+/// Errors related to writing or reading data from Delta
+#[derive(Error, Debug)]
+pub enum DeltaError {
+    #[error("Delta I/O error: {0}")]
+    IoError(String),
+
+    #[error("Delta table operation error: {0}")]
+    TableError(String),
+}
+
+/// Errors related to monitoring and telemetry
+#[derive(Error, Debug)]
+pub enum MonitoringError {
+    #[error("Telemetry endpoint error: {0}")]
+    ExporterError(String),
+
+    #[error("Telemetry shutdown error: {0}")]
+    ShutdownError(String),
+}
+
+/// A top-level application error enum combining sub-errors
+#[derive(Error, Debug)]
 pub enum AppError {
-    NetworkError(String),
-    ConnectionError(String),
-    SchemaError(String),
-    LogicError(String),
+    #[error("Config error: {0}")]
+    Config(#[from] ConfigError),
+
+    #[error("Kafka error: {0}")]
+    Kafka(#[from] KafkaError),
+
+    #[error("Pipeline error: {0}")]
+    Pipeline(#[from] PipelineError),
+
+    #[error("Delta error: {0}")]
+    Delta(#[from] DeltaError),
+
+    #[error("Telemetry error: {0}")]
+    Monitoring(#[from] MonitoringError),
+
+    #[error("Other error: {0}")]
+    Other(String),
 }
 
-impl std::error::Error for AppError {}
-
-impl fmt::Display for AppError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            AppError::NetworkError(msg) => write!(f, "Network error: {}", msg),
-            AppError::ConnectionError(msg) => write!(f, "Connection error: {}", msg),
-            AppError::SchemaError(msg) => write!(f, "Schema error: {}", msg),
-            AppError::LogicError(msg) => write!(f, "Logic error: {}", msg),
-        }
-    }
-}
+/// A specialized result type for our application
+pub type AppResult<T> = std::result::Result<T, AppError>;
 
 //---------------------------------------- Tests ----------------------------------------
 
@@ -30,8 +89,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_error_display() {
-        let err = AppError::NetworkError("timeout".to_string());
-        assert_eq!(err.to_string(), "Network error: timeout");
+    fn test_config_error_display() {
+        let err = ConfigError::ReadError("file not found".into());
+        assert_eq!(
+            err.to_string(),
+            "Failed to read or parse configuration file: file not found"
+        );
+    }
+
+    #[test]
+    fn test_kafka_error_display() {
+        let err = KafkaError::BrokerConnection("unable to connect".into());
+        assert_eq!(
+            err.to_string(),
+            "Error connecting to Kafka broker: unable to connect"
+        );
+    }
+
+    #[test]
+    fn test_pipeline_error_display() {
+        let err = PipelineError::InsertError("insert failed".into());
+        assert_eq!(
+            err.to_string(),
+            "Failed to insert record into aggregator: insert failed"
+        );
+    }
+
+    #[test]
+    fn test_delta_error_display() {
+        let err = DeltaError::IoError("disk error".into());
+        assert_eq!(err.to_string(), "Delta I/O error: disk error");
+    }
+
+    #[test]
+    fn test_app_error_display() {
+        // Test the AppError::Other variant.
+        let err = AppError::Other("unknown error".into());
+        assert_eq!(err.to_string(), "Other error: unknown error");
+
+        // Test wrapping a KafkaError.
+        let kafka_err = AppError::Kafka(KafkaError::ReadError("read failed".into()));
+        assert_eq!(
+            kafka_err.to_string(),
+            "Kafka error: Error reading from Kafka: read failed"
+        );
     }
 }

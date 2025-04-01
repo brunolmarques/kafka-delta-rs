@@ -1,86 +1,282 @@
-use prometheus_client::encoding::text::encode;
-use prometheus_client::metrics::counter::Counter;
-use prometheus_client::registry::Registry;
-use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::spawn;
+// src/monitoring/mod.rs
 
-// Implements monitoring endpoints exposing Prometheus metrics
-// using the prometheus crate and exposing a HTTP endpoint via Tokio.
-pub fn init_monitoring(port: u16) {
-    // Set up Prometheus registry and metrics.
-    let mut registry = Registry::default();
-    let events_processed: Counter = Counter::default();
-    let processed_event_size: Counter = Counter::default();
+use opentelemetry::metrics::{
+    Counter, Histogram, Meter, MeterProvider, ObservableGauge, UpDownCounter,
+};
+use opentelemetry::{KeyValue, global};
+use opentelemetry_otlp::MetricExporter;
+use opentelemetry_otlp::{Protocol, WithExportConfig};
+use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
+use std::sync::OnceLock;
 
-    registry.register(
-        "events_processed",
-        "Total number of events processed",
-        events_processed,
-    );
+use crate::config::MonitoringConfig;
+use crate::handlers::{AppError, AppResult, MonitoringError};
 
-    registry.register(
-        "processed_event_size",
-        "Total size of processed events",
-        processed_event_size,
-    );
+use std::any::Any;
 
-    let reg = Arc::new(registry);
-    let addr = format!("0.0.0.0:{}", port);
+// Add a static variable to store the meter provider.
+static METER_PROVIDER: OnceLock<SdkMeterProvider> = OnceLock::new();
 
-    spawn(async move {
-        let listener = TcpListener::bind(&addr)
-            .await
-            .expect("Failed to bind metrics server");
-        log::info!("Prometheus metrics server running on {}", addr);
+/// A handle fo r the telemetry system. Store references to the meter, counters, histograms, etc.
+#[derive(Clone)]
+pub struct Monitoring {
+    meter: Meter,
+    messages_read_counter: Counter<u64>,
+    message_size_counter: Counter<u64>,
+    kafka_commit_counter: Counter<u64>,
+    offset_lag_gauge: UpDownCounter<i64>,
+    delta_write_counter: Counter<u64>,
+    delta_flush_histogram: Histogram<f64>,
+}
 
-        loop {
-            let (mut socket, _) = listener
-                .accept()
-                .await
-                .expect("Failed to accept connection");
-
-            let mut buffer = String::new();
-            encode(&mut buffer, &*reg).unwrap();
-
-            // Split response into header and body.
-            let header = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
-                buffer.len()
-            );
-            socket
-                .write_all(header.as_bytes())
-                .await
-                .expect("Failed to write header");
-            socket
-                .write_all(&buffer.into_bytes())
-                .await
-                .expect("Failed to write body");
+impl Monitoring {
+    /// Initialize the telemetry pipeline and create metric instruments.
+    /// Call this once at the start of the application (in `main`).
+    pub fn init(config: &MonitoringConfig) -> AppResult<Self> {
+        if !config.enabled {
+            // If disabled, return a NO_OP handle or a handle that does nothing.
+            return Ok(Self::no_op());
         }
-    });
-    log::info!("Monitoring initialized on port: {}", port);
+
+        // Build a resource describing this application/process.
+        fn get_resource(config: &MonitoringConfig) -> Resource {
+            static RESOURCE: OnceLock<Resource> = OnceLock::new();
+            RESOURCE
+                .get_or_init(|| {
+                    Resource::builder()
+                        .with_service_name(config.service_name.clone())
+                        .build()
+                })
+                .clone()
+        }
+
+        // Set up the OTLP metrics exporter if an endpoint is provided.
+        let metrics_exporter = MetricExporter::builder()
+            .with_http()
+            .with_protocol(Protocol::HttpBinary)
+            .with_endpoint(config.endpoint.clone())
+            .build()
+            .map_err(|e| {
+                log::error!("Failed to create metric exporter: {}", e);
+                AppError::Monitoring(MonitoringError::ExporterError(format!(
+                    "Failed to create metric exporter: {}",
+                    e
+                )))
+            })?;
+
+        // Create a PeriodicReader that automatically exports metrics on an interval.
+        // By default, it flushes every 60 seconds (customizable).
+        let reader = PeriodicReader::builder(metrics_exporter).build();
+
+        // Create a meter provider with the OTLP Metric exporter
+        let meter_provider = SdkMeterProvider::builder()
+            .with_resource(get_resource(config))
+            .with_reader(reader)
+            .build();
+
+        // Store the meter provider in the static variable.
+        let _ = METER_PROVIDER.set(meter_provider.clone());
+
+        // Set the global meter provider to the one created.
+        global::set_meter_provider(meter_provider.clone());
+
+        // Acquire the global meter
+        let service_name_static: &'static str =
+            Box::leak(config.service_name.clone().into_boxed_str());
+        let meter = global::meter(service_name_static);
+
+        // Create the instruments we want to record with.
+        let messages_read_counter = meter
+            .u64_counter("kafka_messages_read")
+            .with_description("Number of messages read from Kafka topics")
+            .build();
+
+        let message_size_counter = meter
+            .u64_counter("kafka_messages_size_bytes")
+            .with_description("Total size in bytes of messages read from Kafka")
+            .build();
+
+        let kafka_commit_counter = meter
+            .u64_counter("kafka_commits")
+            .with_description("Number of commits performed on Kafka")
+            .build();
+
+        let offset_lag_gauge = meter
+            .i64_up_down_counter("kafka_offset_lag")
+            .with_description("Tracks the offset lag behind the latest committed offset")
+            .build();
+
+        let delta_write_counter = meter
+            .u64_counter("delta_messages_written")
+            .with_description("Number of messages/records written to Delta table")
+            .build();
+
+        let delta_flush_histogram = meter
+            .f64_histogram("delta_flush_time_seconds")
+            .with_description("Histogram of flush durations (seconds) to Delta table")
+            .build();
+
+        Ok(Self {
+            meter,
+            messages_read_counter,
+            message_size_counter,
+            kafka_commit_counter,
+            offset_lag_gauge,
+            delta_write_counter,
+            delta_flush_histogram,
+        })
+    }
+
+    /// Construct a NO_OP monitor if monitoring is disabled, or if initialization fails.
+    fn no_op() -> Self {
+        let meter = global::meter("no-op-meter");
+        let no_op_counter = meter.u64_counter("no-op").build();
+        let no_op_up_down = meter.i64_up_down_counter("no-op").build();
+        let no_op_histogram = meter.f64_histogram("no-op").build();
+
+        Self {
+            meter,
+            messages_read_counter: no_op_counter.clone(),
+            message_size_counter: no_op_counter.clone(),
+            kafka_commit_counter: no_op_counter.clone(),
+            offset_lag_gauge: no_op_up_down,
+            delta_write_counter: no_op_counter,
+            delta_flush_histogram: no_op_histogram,
+        }
+    }
+
+    /// Record number of messages read.
+    pub fn record_kafka_messages_read(&self, count: u64) {
+        self.messages_read_counter.add(count, &[KeyValue::new(
+            "kafka_messages_read",
+            "messages_count",
+        )]);
+    }
+
+    /// Record total size of messages read from Kafka.
+    pub fn record_kafka_messages_size(&self, size_bytes: u64) {
+        self.message_size_counter.add(size_bytes, &[KeyValue::new(
+            "kafka_messages_size",
+            "messages_size_bytes",
+        )]);
+    }
+
+    /// Record a Kafka commit event.
+    pub fn record_kafka_commit(&self) {
+        self.kafka_commit_counter
+            .add(1, &[KeyValue::new("kafka_commits", "commits_count")]);
+    }
+
+    /// Set offset lag gauge. This is: latest_available_offset - current_committed_offset.
+    pub fn set_kafka_offset_lag(&self, lag: i64) {
+        self.offset_lag_gauge
+            .add(lag, &[KeyValue::new("kafka_offset_lag", "offset_value")]);
+    }
+
+    /// Record number of messages/records written to Delta.
+    pub fn record_delta_write(&self, count: u64) {
+        self.delta_write_counter.add(count, &[KeyValue::new(
+            "delta_messages_written",
+            "messages_count",
+        )]);
+    }
+
+    /// Observe flush time for writing to Delta.
+    pub fn observe_delta_flush_time(&self, seconds: f64) {
+        self.delta_flush_histogram.record(seconds, &[KeyValue::new(
+            "delta_flush_time_seconds",
+            "flush_time_seconds",
+        )]);
+    }
+
+    /// Shut down the global meter provider, ensuring final metrics are exported.
+    /// Useful if your application is about to exit and you want to ensure everything is sent.
+    pub fn shutdown() {
+        if let Some(provider) = METER_PROVIDER.get() {
+            if let Err(e) = provider.shutdown() {
+                log::error!("Failed to shut down metrics: {}", e);
+                AppError::Monitoring(MonitoringError::ShutdownError(format!(
+                    "Failed to shut down metrics: {}",
+                    e
+                )));
+            }
+        }
+    }
 }
 
 //---------------------------------------- Tests ----------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::time::{Duration, sleep};
+    use opentelemetry::global;
 
-    #[tokio::test]
-    async fn test_monitoring_init() {
-        // Initialize monitoring on port 9090.
-        init_monitoring(9090);
-        sleep(Duration::from_secs(1)).await; // allow server to start
+    // Define a dummy MonitoringConfig for testing.
+    // Uncomment the following if the actual MonitoringConfig is not available.
+    /*
+    #[derive(Clone)]
+    pub struct MonitoringConfig {
+        pub enabled: bool,
+        pub endpoint: Option<String>,
+        pub service_name: String,
+    }
+    */
 
-        // Connect to the metrics endpoint and check for registered metric.
-        let mut stream = TcpStream::connect("127.0.0.1:9090")
-            .await
-            .expect("Failed to connect");
-        let mut buffer = vec![0; 1024];
-        let n = stream.read(&mut buffer).await.expect("Failed to read data");
-        let response = String::from_utf8_lossy(&buffer[..n]);
-        assert!(response.contains("events_processed"));
+    // Define a helper to create a no-op config.
+    fn dummy_no_op_config() -> crate::config::MonitoringConfig {
+        crate::config::MonitoringConfig {
+            enabled: false,
+            endpoint: "".to_string(),
+            service_name: "test-service".to_string(),
+        }
+    }
+
+    // Define a helper to create an enabled config.
+    // Using endpoint as an empty string as placeholder to avoid OTLP initialization in tests.
+    fn dummy_enabled_config() -> crate::config::MonitoringConfig {
+        crate::config::MonitoringConfig {
+            enabled: true,
+            endpoint: "".to_string(),
+            service_name: "test-service".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_init_no_op() {
+        let config = dummy_no_op_config();
+        let monitor = Monitoring::init(&config).expect("init failed");
+        // Call record functions to verify they do not panic.
+        monitor.record_kafka_messages_read(10);
+        monitor.record_kafka_messages_size(1024);
+        monitor.record_kafka_commit();
+        monitor.set_kafka_offset_lag(5);
+        monitor.record_delta_write(3);
+        monitor.observe_delta_flush_time(0.5);
+    }
+
+    #[test]
+    fn test_init_enabled() {
+        let config = dummy_enabled_config();
+        let monitor = Monitoring::init(&config).expect("init failed");
+        // Call record functions to verify normal operation.
+        monitor.record_kafka_messages_read(20);
+        monitor.record_kafka_messages_size(2048);
+        monitor.record_kafka_commit();
+        monitor.set_kafka_offset_lag(-3);
+        monitor.record_delta_write(5);
+        monitor.observe_delta_flush_time(1.2);
+        // Ensure the static meter provider is set.
+        assert!(METER_PROVIDER.get().is_some(), "Meter provider not set");
+    }
+
+    #[test]
+    fn test_shutdown() {
+        // Initialize an enabled monitor to set the static meter provider.
+        let _ = Monitoring::init(&dummy_enabled_config()).expect("init failed");
+        // Call shutdown and ensure it does not panic.
+        Monitoring::shutdown();
+        // Optionally, ensure global state remains accessible.
+        let _ = global::meter("post-shutdown-meter");
     }
 }
