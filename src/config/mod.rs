@@ -89,7 +89,7 @@ impl AppConfig {
         })?;
 
         // Validate mandatory fields
-        if config.kafka.broker.is_empty() {
+        if config.kafka.broker.trim().is_empty() {
             log::error!("Invalid config: kafka.broker is empty");
             return Err(ConfigError::InvalidField("kafka.broker is empty".to_string()).into());
         }
@@ -100,25 +100,30 @@ impl AppConfig {
             )
             .into());
         }
-        if config.kafka.group_id.is_empty() {
+        if config.kafka.group_id.trim().is_empty() {
             log::error!("Invalid config: kafka.group_id is empty");
             return Err(ConfigError::InvalidField("kafka.group_id is empty".to_string()).into());
         }
-        if config.delta.table_path.is_empty() {
+        if config.delta.table_path.trim().is_empty() {
             log::error!("Invalid config: delta.table_path is empty");
             return Err(ConfigError::InvalidField("delta.table_path is empty".to_string()).into());
         }
-        if config.delta.partition.is_empty() {
+        if config.delta.partition.trim().is_empty() {
             log::error!("Invalid config: delta.partition is empty");
             return Err(ConfigError::InvalidField("delta.partition is empty".to_string()).into());
         }
 
-        if config.pipeline.max_buffer_size.is_none() || config.pipeline.max_buffer_size.unwrap() < 1 {
-            log::warn!("Warning: max_buffer_size is not set or is less than 1. Defaulting to 10000.");
+        if config.pipeline.max_buffer_size.is_none() || config.pipeline.max_buffer_size.unwrap() < 1
+        {
+            log::warn!(
+                "Warning: max_buffer_size is not set or is less than 1. Defaulting to 10000."
+            );
         }
 
         if config.pipeline.max_wait_secs.is_none() || config.pipeline.max_wait_secs.unwrap() < 1 {
-            log::warn!("Warning: max_wait_secs is not set or is less than 1. Defaulting to 360 seconds.");
+            log::warn!(
+                "Warning: max_wait_secs is not set or is less than 1. Defaulting to 360 seconds."
+            );
         }
 
         if config.kafka.timeout.is_none() {
@@ -127,7 +132,9 @@ impl AppConfig {
 
         if config.monitoring.enabled && config.monitoring.endpoint.is_empty() {
             log::error!("Invalid config: monitoring.endpoint is empty");
-            return Err(ConfigError::InvalidField("monitoring.endpoint is empty".to_string()).into());
+            return Err(
+                ConfigError::InvalidField("monitoring.endpoint is empty".to_string()).into(),
+            );
         }
 
         log::info!("Configuration file loaded successfully");
@@ -140,25 +147,16 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::random;
     use std::fs;
     use std::path::PathBuf;
 
-    // Helper function to load config from a YAML string using a temporary file.
-    fn load_config_from_str(yaml: &str) -> AppResult<AppConfig> {
-        let tmp_path: PathBuf = std::env::temp_dir().join("temp_config.yaml");
-        fs::write(&tmp_path, yaml).unwrap();
-        let config = AppConfig::load_config(&tmp_path);
-        fs::remove_file(&tmp_path).unwrap();
-        config
-    }
-
-    #[test]
-    fn test_load_config() {
-        let yaml = r#"
+    // Updated helper to generate a dummy valid YAML config for tests.
+    fn dummy_yaml_config() -> String {
+        r#"
 kafka:
   broker: "localhost:9092"
-  topics: 
-    - "topic1"
+  topics: ["topic1"]
   group_id: "my_group"
   timeout: 5000
 delta:
@@ -168,45 +166,45 @@ delta:
 logging:
   level: "INFO"
 monitoring:
-  host: "localhost"
-  port: 9090
+  enabled: true
+  service_name: "monitor_service"
   endpoint: "/metrics"
 concurrency:
   thread_pool_size: 4
   retry_attempts: 3
-batch:
+pipeline:
   max_buffer_size: 1000
   max_wait_secs: 100
-        "#;
-        let config: AppConfig = serde_yaml::from_str(yaml).unwrap();
+credentials:
+  kafka_username: "user"
+  kafka_password: "pass"
+  delta_credentials: "cred"
+        "#
+        .to_string()
+    }
+
+    // Helper to load config from a YAML string using a temporary file.
+    fn load_config_from_str(yaml: &str) -> AppResult<AppConfig> {
+        let random_number: u64 = rand::random();
+        let tmp_path: PathBuf =
+            std::env::temp_dir().join(format!("temp_config_{}.yaml", random_number));
+        fs::write(&tmp_path, yaml).unwrap();
+        let config = AppConfig::load_config(&tmp_path);
+        fs::remove_file(&tmp_path).unwrap_or(());
+        config
+    }
+
+    #[test]
+    fn test_load_config() {
+        let yaml = dummy_yaml_config();
+        let config: AppConfig = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(config.kafka.broker, "localhost:9092");
     }
 
     #[test]
     fn test_missing_kafka_broker() {
-        let yaml = r#"
-kafka:
-  broker: ""
-  topics: ["topic1"]
-  group_id: "my_group"
-delta:
-  table_path: "/data/delta/table"
-  partition: "day-time"
-  mode: "INSERT"
-logging:
-  level: "INFO"
-monitoring:
-  host: "localhost"
-  port: 9090
-  endpoint: "/metrics"
-concurrency:
-  thread_pool_size: 4
-  retry_attempts: 3
-batch:
-  max_buffer_size: 1000
-  max_wait_secs: 100
-        "#;
-        let res = load_config_from_str(yaml);
+        let yaml = dummy_yaml_config().replace("localhost:9092", "");
+        let res = load_config_from_str(&yaml);
         assert!(res.is_err());
         let err = format!("{:?}", res.err().unwrap());
         assert!(err.contains("kafka.broker is empty"));
@@ -214,29 +212,8 @@ batch:
 
     #[test]
     fn test_missing_kafka_topics() {
-        let yaml = r#"
-kafka:
-  broker: "localhost:9092"
-  topics: []
-  group_id: "my_group"
-delta:
-  table_path: "/data/delta/table"
-  partition: "day-time"
-  mode: "INSERT"
-logging:
-  level: "INFO"
-monitoring:
-  host: "localhost"
-  port: 9090
-  endpoint: "/metrics"
-concurrency:
-  thread_pool_size: 4
-  retry_attempts: 3
-batch:
-  max_buffer_size: 1000
-  max_wait_secs: 100
-        "#;
-        let res = load_config_from_str(yaml);
+        let yaml = dummy_yaml_config().replace("[\"topic1\"]", "[]");
+        let res = load_config_from_str(&yaml);
         assert!(res.is_err());
         let err = format!("{:?}", res.err().unwrap());
         assert!(err.contains("kafka.topics should have at least one topic"));
@@ -244,29 +221,8 @@ batch:
 
     #[test]
     fn test_missing_kafka_group_id() {
-        let yaml = r#"
-kafka:
-  broker: "localhost:9092"
-  topics: ["topic1"]
-  group_id: ""
-delta:
-  table_path: "/data/delta/table"
-  partition: "day-time"
-  mode: "INSERT"
-logging:
-  level: "INFO"
-monitoring:
-  host: "localhost"
-  port: 9090
-  endpoint: "/metrics"
-concurrency:
-  thread_pool_size: 4
-  retry_attempts: 3
-batch:
-  max_buffer_size: 1000
-  max_wait_secs: 100
-        "#;
-        let res = load_config_from_str(yaml);
+        let yaml = dummy_yaml_config().replace("my_group", "");
+        let res = load_config_from_str(&yaml);
         assert!(res.is_err());
         let err = format!("{:?}", res.err().unwrap());
         assert!(err.contains("kafka.group_id is empty"));
@@ -274,95 +230,33 @@ batch:
 
     #[test]
     fn test_missing_delta_table_path() {
-        let yaml = r#"
-kafka:
-  broker: "localhost:9092"
-  topics: ["topic1"]
-  group_id: "my_group"
-delta:
-  table_path: ""
-  partition: "day-time"
-  mode: "INSERT"
-logging:
-  level: "INFO"
-monitoring:
-  host: "localhost"
-  port: 9090
-  endpoint: "/metrics"
-concurrency:
-  thread_pool_size: 4
-  retry_attempts: 3
-batch:
-  max_buffer_size: 1000
-  max_wait_secs: 100
-        "#;
-        let res = load_config_from_str(yaml);
+        let yaml = dummy_yaml_config().replace("/data/delta/table", "");
+        let res = load_config_from_str(&yaml);
         assert!(res.is_err());
         let err = format!("{:?}", res.err().unwrap());
+        // Updated assertion to check the full expected message.
         assert!(err.contains("delta.table_path is empty"));
     }
 
     #[test]
     fn test_missing_delta_partition() {
-        let yaml = r#"
-kafka:
-  broker: "localhost:9092"
-  topics: ["topic1"]
-  group_id: "my_group"
-delta:
-  table_path: "/data/delta/table"
-  partition: ""
-  mode: "INSERT"
-logging:
-  level: "INFO"
-monitoring:
-  host: "localhost"
-  port: 9090
-  endpoint: "/metrics"
-concurrency:
-  thread_pool_size: 4
-  retry_attempts: 3
-batch:
-  max_buffer_size: 1000
-  max_wait_secs: 100
-        "#;
-        let res = load_config_from_str(yaml);
+        let yaml = dummy_yaml_config().replace("day-time", "");
+        let res = load_config_from_str(&yaml);
         assert!(res.is_err());
         let err = format!("{:?}", res.err().unwrap());
+        // Updated assertion to check the full expected message.
         assert!(err.contains("delta.partition is empty"));
     }
 
     #[test]
     fn test_valid_config() {
-        let yaml = r#"
-kafka:
-  broker: "localhost:9092"
-  topics: ["topic1"]
-  group_id: "my_group"
-delta:
-  table_path: "/data/delta/table"
-  partition: "day-time"
-  mode: "INSERT"
-logging:
-  level: "INFO"
-monitoring:
-  host: "localhost"
-  port: 9090
-  endpoint: "/metrics"
-concurrency:
-  thread_pool_size: 4
-  retry_attempts: 3
-batch:
-  max_buffer_size: 1000
-  max_wait_secs: 100
-        "#;
-        let config = load_config_from_str(yaml).unwrap();
+        let yaml = dummy_yaml_config();
+        let config = load_config_from_str(&yaml).unwrap();
         assert_eq!(config.kafka.broker, "localhost:9092");
     }
 
     #[test]
     fn test_nonexistent_yaml() {
-        use std::path::PathBuf;
         let path: PathBuf = std::env::temp_dir().join("nonexistent_file.yaml");
         let res = AppConfig::load_config(&path);
         assert!(res.is_err());

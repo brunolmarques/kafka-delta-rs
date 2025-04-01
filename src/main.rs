@@ -15,13 +15,12 @@ use std::env;
 use std::sync::Arc;
 use tokio::main;
 
-use crate::handlers::{AppError, AppResult};
 use crate::config::AppConfig;
-use crate::pipeline::Pipeline;
+use crate::handlers::{AppError, AppResult};
 use crate::kafka::KafkaConsumer;
 use crate::logging::init_logging;
 use crate::monitoring::Monitoring;
-
+use crate::pipeline::Pipeline;
 
 #[tokio::main]
 async fn main() {
@@ -38,7 +37,6 @@ async fn run() -> Result<(), AppError> {
     // 1) Load config
     let app_config = AppConfig::load_config(config_file)?;
 
-
     // 2) Initialize logging and monitoring
     init_logging(&app_config.logging);
     let monitoring = Monitoring::init(&app_config.monitoring)?;
@@ -46,8 +44,8 @@ async fn run() -> Result<(), AppError> {
     // 3) Initialize the pipeline
     let pipeline = Arc::new(Pipeline::new(&app_config.delta, Some(&monitoring)));
 
-    // 4) Initialize Kafka consumer 
-    let consumer = KafkaConsumer::new(&app_config, pipeline,Some(&monitoring))?;
+    // 4) Initialize Kafka consumer
+    let consumer = KafkaConsumer::new(&app_config, pipeline, Some(&monitoring))?;
 
     // TODO: finish implementing the run method
 

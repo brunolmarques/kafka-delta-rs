@@ -82,9 +82,7 @@ pub enum AppError {
 /// A specialized result type for our application
 pub type AppResult<T> = std::result::Result<T, AppError>;
 
-
 //---------------------------------------- Tests ----------------------------------------
-
 
 #[cfg(test)]
 mod tests {
@@ -136,5 +134,4 @@ mod tests {
             "Kafka error: Error reading from Kafka: read failed"
         );
     }
-
 }

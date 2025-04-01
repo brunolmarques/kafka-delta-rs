@@ -76,7 +76,7 @@ impl InMemoryAggregator {
 pub struct Pipeline<'a> {
     aggregator: Arc<Mutex<InMemoryAggregator>>,
     delta_config: &'a DeltaConfig,
-    monitoring: Option<&'a Monitoring>,     // TODO: Implement monitoring
+    monitoring: Option<&'a Monitoring>, // TODO: Implement monitoring
 }
 
 impl<'a> Pipeline<'a> {
@@ -187,7 +187,7 @@ impl<'a> PipelineTrait for Pipeline<'a> {
 
     fn aggregator_len(&self) -> usize {
         let agg = self.aggregator.lock().unwrap(); // In practice, handle PoisonError
-        agg.len() 
+        agg.len()
     }
 }
 
@@ -198,7 +198,7 @@ mod tests {
     use super::*;
     use tokio;
 
-    // Add helper for creating a pipeline instance with default config used in tests
+    // Updated helper for creating a pipeline instance for tests.
     fn create_pipeline() -> Pipeline<'static> {
         let config = Box::leak(Box::new(DeltaConfig {
             table_path: "dummy".to_string(),
@@ -248,8 +248,9 @@ mod tests {
         assert!(res.is_err());
     }
 
+    // Renamed test to fix typo.
     #[tokio::test]
-    async fn test_flush_empy_the_aggregator() {
+    async fn test_flush_empty_the_aggregator() {
         let pipeline = create_pipeline();
         pipeline
             .insert_record(1, Some("a".to_string()), "payload1".to_string())
@@ -265,7 +266,6 @@ mod tests {
         assert_eq!(pipeline.aggregator_len(), 0);
     }
 
-    // Non-asynchronous tests for InMemoryAggregator
     #[test]
     fn test_inmemory_aggregator_insert_and_len() {
         let mut aggregator = InMemoryAggregator::new();
@@ -305,7 +305,6 @@ mod tests {
 
         let drained = aggregator.drain();
         assert_eq!(drained.len(), 2);
-        // After draining, aggregator should be empty
         assert_eq!(aggregator.len(), 0);
     }
 }
