@@ -1,22 +1,21 @@
-// src/monitoring/mod.rs
+// Monitoring and instrumentation
 
-use opentelemetry::metrics::{
-    Counter, Histogram, Meter, MeterProvider, ObservableGauge, UpDownCounter,
-};
+use opentelemetry::metrics::{Counter, Histogram, Meter, UpDownCounter};
 use opentelemetry::{KeyValue, global};
 use opentelemetry_otlp::MetricExporter;
 use opentelemetry_otlp::{Protocol, WithExportConfig};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering}; 
 
 use crate::config::MonitoringConfig;
 use crate::handlers::{AppError, AppResult, MonitoringError};
 
-use std::any::Any;
 
 // Add a static variable to store the meter provider.
 static METER_PROVIDER: OnceLock<SdkMeterProvider> = OnceLock::new();
+static SHUTDOWN_CALLED: AtomicBool = AtomicBool::new(false); // added static flag
 
 /// A handle fo r the telemetry system. Store references to the meter, counters, histograms, etc.
 #[derive(Clone)]
@@ -194,12 +193,17 @@ impl Monitoring {
     /// Useful if your application is about to exit and you want to ensure everything is sent.
     pub fn shutdown() {
         if let Some(provider) = METER_PROVIDER.get() {
-            if let Err(e) = provider.shutdown() {
-                log::error!("Failed to shut down metrics: {}", e);
-                AppError::Monitoring(MonitoringError::ShutdownError(format!(
-                    "Failed to shut down metrics: {}",
-                    e
-                )));
+            match provider.shutdown() {
+                Ok(()) => {
+                    SHUTDOWN_CALLED.store(true, Ordering::SeqCst); // mark shutdown as called
+                }
+                Err(e) => {
+                    log::error!("Failed to shut down metrics: {}", e);
+                    AppError::Monitoring(MonitoringError::ShutdownError(format!(
+                        "Failed to shut down metrics: {}",
+                        e
+                    )));
+                }
             }
         }
     }
@@ -211,17 +215,7 @@ impl Monitoring {
 mod tests {
     use super::*;
     use opentelemetry::global;
-
-    // Define a dummy MonitoringConfig for testing.
-    // Uncomment the following if the actual MonitoringConfig is not available.
-    /*
-    #[derive(Clone)]
-    pub struct MonitoringConfig {
-        pub enabled: bool,
-        pub endpoint: Option<String>,
-        pub service_name: String,
-    }
-    */
+    use std::sync::atomic::Ordering; // added for testing
 
     // Define a helper to create a no-op config.
     fn dummy_no_op_config() -> crate::config::MonitoringConfig {
@@ -232,12 +226,11 @@ mod tests {
         }
     }
 
-    // Define a helper to create an enabled config.
-    // Using endpoint as an empty string as placeholder to avoid OTLP initialization in tests.
+    // Updated helper to create an enabled config with a valid endpoint.
     fn dummy_enabled_config() -> crate::config::MonitoringConfig {
         crate::config::MonitoringConfig {
             enabled: true,
-            endpoint: "".to_string(),
+            endpoint: "http://localhost:4318".to_string(), // valid dummy endpoint
             service_name: "test-service".to_string(),
         }
     }
@@ -276,7 +269,9 @@ mod tests {
         let _ = Monitoring::init(&dummy_enabled_config()).expect("init failed");
         // Call shutdown and ensure it does not panic.
         Monitoring::shutdown();
-        // Optionally, ensure global state remains accessible.
-        let _ = global::meter("post-shutdown-meter");
+        assert!(
+            SHUTDOWN_CALLED.load(Ordering::SeqCst),
+            "Shutdown was not successful"
+        );
     }
 }

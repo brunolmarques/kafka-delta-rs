@@ -10,13 +10,8 @@ use crate::config::DeltaConfig;
 use crate::handlers::PipelineError::{FlushError, InsertError};
 use crate::handlers::{AppError, AppResult, DeltaError, PipelineError};
 use crate::monitoring::Monitoring;
+use crate::model::MessageRecord;
 
-#[derive(Debug, Clone)]
-pub struct MessageRecord {
-    pub offset: i64,
-    pub key: Option<String>,
-    pub payload: String,
-}
 
 /// Buffer used for consolidating messages
 #[derive(Debug)]
@@ -169,16 +164,6 @@ impl<'a> PipelineTrait for Pipeline<'a> {
         );
 
         // TODO: Implement Delta table writing logic here
-        // Example: This is where you'd use the deltalake crate
-        // If an error happens, you can do:
-        //   return Err(PipelineError::FlushError("Delta I/O failed: ...".into()));
-
-        // for r in batch {
-        //     println!(
-        //         "Offset={}, Key={:?}, Payload={}",
-        //         r.offset, r.key, r.payload
-        //     );
-        // }
 
         log::info!("Flush completed.");
 

@@ -35,6 +35,9 @@ pub enum PipelineError {
 
     #[error("Failed to flush aggregator: {0}")]
     FlushError(String),
+
+    #[error("Failed to parse message to Delta schema: {0}")]
+    ParseError(String),
 }
 
 /// Errors related to writing or reading data from Delta

@@ -5,6 +5,7 @@ use serde::Deserialize;
 use std::path::Path;
 
 use crate::handlers::{AppResult, ConfigError};
+use crate::model::FieldConfig;
 
 #[derive(Debug, Deserialize)]
 pub struct AppConfig {
@@ -30,6 +31,7 @@ pub struct DeltaConfig {
     pub table_path: String,
     pub partition: String,
     pub mode: String,
+    pub schema: Option<Vec<FieldConfig>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,6 +95,7 @@ impl AppConfig {
             log::error!("Invalid config: kafka.broker is empty");
             return Err(ConfigError::InvalidField("kafka.broker is empty".to_string()).into());
         }
+
         if config.kafka.topics.is_empty() {
             log::error!("Invalid config: kafka.topics should have at least one topic");
             return Err(ConfigError::InvalidField(
@@ -100,14 +103,17 @@ impl AppConfig {
             )
             .into());
         }
+
         if config.kafka.group_id.trim().is_empty() {
             log::error!("Invalid config: kafka.group_id is empty");
             return Err(ConfigError::InvalidField("kafka.group_id is empty".to_string()).into());
         }
+
         if config.delta.table_path.trim().is_empty() {
             log::error!("Invalid config: delta.table_path is empty");
             return Err(ConfigError::InvalidField("delta.table_path is empty".to_string()).into());
         }
+        
         if config.delta.partition.trim().is_empty() {
             log::error!("Invalid config: delta.partition is empty");
             return Err(ConfigError::InvalidField("delta.partition is empty".to_string()).into());
@@ -135,6 +141,17 @@ impl AppConfig {
             return Err(
                 ConfigError::InvalidField("monitoring.endpoint is empty".to_string()).into(),
             );
+        }
+
+        if config.delta.schema.is_none() {
+            log::warn!("Warning: delta.schema is not set. All columns will be parsed as strings.");
+        }
+
+        // If a schema is present, check each field
+        if let Some(ref fields) = config.delta.schema {
+          for f in fields {
+              f.validate()?;
+          }
         }
 
         log::info!("Configuration file loaded successfully");

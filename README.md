@@ -1,6 +1,6 @@
 # Kafka-Delta-Rust
 
-Welcome to **Kafka-Delta-Rust**: a Rust-based application that reads data from a Kafka topic, consolidates and deduplicates records in parallel, and writes them daily into an existing Delta Lake table—partitioned by a specific column. This project is designed with extensibility, reliability, and performance in mind, using **Tokio** for concurrency, **Rayon** for parallelization, and **deltalake** for Delta Lake operations.
+Welcome to **Kafka-Delta-Rust**: a Rust-based application that reads data from a Kafka topic, consolidates and deduplicates records, and writes them into an existing Delta Lake table—partitioned by a specific column. This project is designed with extensibility, reliability, and performance in mind, using **Tokio** for concurrency, **BTreeMap** and **HashSet** for data deduplication and ordering, and **deltalake** for Delta Lake operations. In addition, the application uses **Log** for logging and **Opentelemetry** for instrumentation.
 
 ---
 
@@ -10,11 +10,8 @@ Below is a high-level overview of how the project is structured. **Each module**
 
 ```
 kafka-delta-rust/
-├── Cargo.toml
-├── Dockerfile
-├── .dockerignore
-├── README.md
-├── config.yaml                # Example YAML configuration
+├── Cargo.toml                 # Application dependencies
+├── config.yaml                # Applicaiton YAML configuration
 ├── src/
 │   ├── main.rs                # Entry point (handles CLI arguments, config parsing)
 │   ├── config/
@@ -27,9 +24,14 @@ kafka-delta-rust/
 │   │   ├── mod.rs             # Buffer consolidation and deduplication logic
 │   ├── handlers/
 │   │   ├── mod.rs             # Custom error types
+│   ├── monitoring/
+│   │   ├── mod.rs             # Opentelemetry integration
 │   ├── logging/
-│   │   ├── mod.rs             # Prometheus integration
-│   └── utils.rs               # Utility functions, if needed
+│   │   ├── mod.rs             # Logging config
+|   ├── model/
+│   │   ├── mod.rs             # Data model, defines messages structs and delta schemas
+│   └── utils.rs               
+|       ├── mod.rs             # Utility functions, if needed
 └── tests/
     ├── integration.rs         # Integration tests
     └── ...                    # Additional integration test files
@@ -55,8 +57,8 @@ kafka-delta-rust/
 ## Key Features
 
 - **Multi-topic Kafka ingestion**: Reads from multiple Kafka topics (with possible replicas), using **Tokio** to handle asynchronous consumers.
-- **Parallel processing**: Uses **Rayon** for CPU-bound tasks (data consolidation, deduplication) and guards against data races.
-- **Delta Lake integration**: Writes data (daily partitions) to an existing Delta Lake table using **delta-rs**. Operations can be **INSERT** or **MERGE** for updates.
+- **Primitive Data Structures**: Uses BTreeMap and HashSet for data consolidation, deduplication, and ordering. Mutex is used as guards against data races.
+- **Delta Lake integration**: Writes data (specific partition) to an existing Delta Lake table using **deltalake**. Operations can be **INSERT** or **MERGE** for updates.
 - **Idempotent and Atomic**: Ensures that if the process crashes mid-operation, it can resume from the last successful checkpoint without data corruption or duplication.
 - **Configuration-as-code**: YAML-based configuration that can also be overridden via CLI arguments.
 - **Logging & Monitoring**: Integrates with Prometheus for metrics and leverages standard Rust logging for runtime insights.
@@ -72,13 +74,13 @@ The general data flow is as follows:
 
 1. **Kafka Consumer**: A pool of async tasks (`Tokio`) reads from Kafka topics. Each task streams messages in real time.
 2. **Buffering & Parallel Processing**:
-   - Messages are batched, consolidated, and deduplicated in parallel using **Rayon**.
-   - Data race conditions are prevented with robust synchronization primitives (e.g., locks or channels).
-3. **Daily Write to Delta Lake**:
-   - Once a day (or at a configured interval), the application writes the consolidated data to a partitioned Delta table.
-   - Only the partition corresponding to the current day is affected, avoiding expensive full-table scans.
+   - Messages are batched, consolidated, and deduplicated.
+   - Data race conditions are prevented with robust synchronization primitives (i.e., Arc locks).
+3. **Write to Delta Lake**:
+   - At a configured interval or message volume, the application writes the consolidated data to a partitioned Delta table.
+   - Only the partition corresponding to the current data is affected, avoiding expensive full-table scans.
 4. **Logging & Metrics**:
-   - Logs are streamed to standard output or file (depending on config), and Prometheus metrics are published for monitoring.
+   - Logs are streamed to standard output or file (depending on config), and Opentelemetry metrics are published for monitoring.
 5. **Recovery**:
    - If an interruption occurs, the application uses checkpoints (e.g., offsets, partial data files) to ensure the write is idempotent and consistent upon restart.
 
@@ -189,19 +191,19 @@ This file can be overridden at runtime by specifying an alternative path via a C
 
 3. **Runtime Behavior**:
    - The application will connect to the specified Kafka brokers, subscribe to each listed topic, and continuously pull records.
-   - Data is consolidated in memory (according to your concurrency settings), deduplicated, and stored temporarily.
-   - At the configured interval (e.g., daily at midnight), data is written to the Delta table in an **atomic**, partitioned manner.
+   - Data is consolidated in memory (according to the concurrency settings), deduplicated, and stored temporarily.
+   - At the configured interval (e.g., every 60 minutes), data is written to the Delta table in an **atomic**, partitioned manner.
 
 ---
 
 ## Logging & Monitoring
 
 - **Rust Logger**: Configurable log levels in `config.yaml` (e.g., `ERROR`, `WARN`, `INFO`, `DEBUG`, `TRACE`). Logs are printed to stdout by default.
-- **Prometheus**:
-  - Exposes metrics at a configurable port (e.g., `localhost:9090/metrics`).
+- **Opentelemetry**:
+  - Exposes metrics at a configurable endpoint (e.g., `localhost:9090/metrics`).
   - Tracks application health (e.g., processed record counts, offsets, error rates, memory usage).
 
-Integrate these metrics into your existing Prometheus + Grafana stack to visualize pipeline throughput, latency, and error trends.
+It is possible to integrate these metrics into existing Prometheus + Grafana stack to visualize pipeline throughput, latency, and error trends.
 
 ---
 
@@ -278,4 +280,4 @@ This project is licensed under the [MIT License](./LICENSE).
 
 ---
 
-**Thank you for using Kafka-Delta-Rust!** If you have any questions, feel free to open an issue or submit a pull request. We aim to create a robust, extensible pipeline for near-real-time data processing from Kafka to Delta Lake in Rust.
+**Thank you for using Kafka-Delta-Rust!** If you have any questions, feel free to open an issue or submit a pull request. I aim to create a robust, extensible pipeline for near-real-time data processing from Kafka to Delta Lake in Rust.

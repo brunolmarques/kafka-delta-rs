@@ -10,6 +10,8 @@ mod kafka;
 mod logging;
 mod monitoring;
 mod pipeline;
+mod model;
+mod util;
 
 use std::env;
 use std::sync::Arc;

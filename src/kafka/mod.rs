@@ -137,4 +137,4 @@ impl<'a, T: PipelineTrait> KafkaConsumer<'a, T> {
 }
 
 // Kafka can only be tested with a running Kafka instance.
-// Check test folder for integration tests.
+// Check test directory for integration tests.
