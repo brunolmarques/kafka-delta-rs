@@ -9,7 +9,7 @@ use tokio::task; // added for async trait support
 
 use crate::config::DeltaConfig;
 use crate::handlers::PipelineError::{FlushError, InsertError};
-use crate::handlers::{AppError, AppResult, DeltaError, PipelineError};
+use crate::handlers::{AppResult, DeltaError, PipelineError};
 use crate::model::{MessageRecordTyped, TypedValue};
 use crate::monitoring::Monitoring;
 use crate::utils::parse_to_typed;
@@ -130,7 +130,8 @@ impl<'a> PipelineTrait for Pipeline<'a> {
         key: Option<String>,
         payload: String,
     ) -> AppResult<()> {
-        // Parse the incoming string as JSON:
+        // Parse the incoming string as JSON
+        // TODO: Send invalid messages to dead letter topic
         let parsed_json: serde_json::Value = serde_json::from_str(&payload)
             .map_err(|e| PipelineError::ParseError(format!("Invalid JSON: {e}")))?;
 
@@ -158,16 +159,18 @@ impl<'a> PipelineTrait for Pipeline<'a> {
         log::debug!("Inserting record: {:?}", record);
 
         task::spawn_blocking(move || {
-            let mut agg = aggregator.lock().map_err(|_| {
-                log::error!("insert_record: Failed to acquire aggregator lock");
-                InsertError("Failed to acquire aggregator lock".into())
-            })?;
+            let mut agg = aggregator.lock().unwrap_or_else(|poisoned| {
+                // Mutex lock will only fail in case of poisoned lock
+                // This is a rare case, but can happen if the current lock holder panics
+                // Which can leave the aggregator in an inconsistent state
+                log::warn!("Lock poisoned, recovering inner data");
+                poisoned.into_inner()
+            });
             agg.insert(record)
-        })
-        .await
-        .map_err(|e| {
-            PipelineError::InsertError(format!("Aggregator insertion task panicked: {e}"))
-        })??;
+        }).await
+            .map_err(|e| {
+                PipelineError::InsertError(format!("Aggregator insertion task panicked: {e}"))
+            })??;
 
         log::debug!("Record inserted successfully");
 
@@ -181,10 +184,13 @@ impl<'a> PipelineTrait for Pipeline<'a> {
         log::info!("Flushing aggregator data…");
 
         let batch = task::spawn_blocking(move || {
-            let mut agg = aggregator.lock().map_err(|_| {
-                log::error!("flush: Failed to acquire aggregator lock");
-                FlushError("Failed to acquire aggregator lock".into())
-            })?;
+            let mut agg = aggregator.lock().unwrap_or_else(|poisoned| {
+                // Mutex lock will only fail in case of poisoned lock
+                // This is a rare case, but can happen if the current lock holder panics
+                // Which can leave the aggregator in an inconsistent state
+                log::warn!("Lock poisoned, recovering inner data");
+                poisoned.into_inner()
+            });
             Ok::<_, PipelineError>(agg.drain())
         })
         .await
@@ -196,7 +202,7 @@ impl<'a> PipelineTrait for Pipeline<'a> {
         }
 
         log::info!(
-            "Writing {} records to Delta table at {}…",
+            "Writing {} records to Delta table in path {}",
             batch.len(),
             self.delta_config.table_path.clone()
         );

@@ -43,7 +43,11 @@ pub fn parse_json_value(value: &Value) -> TypedValue {
     }
 }
 
-/// Parse a JSON object according to field configs
+/// Parse a JSON object according to field configs, function uses a complete schema adherence
+/// to the field configs. This means that the JSON object must contain all fields defined in the schema.
+/// The function will return a HashMap<String, TypedValue> where the keys are the field names
+/// and the values are the parsed TypedValue.
+/// If a field is missing or has an invalid type, the function will return an error.
 /*
  Why Return a HashMap Instead of a Struct?
 
@@ -133,6 +137,7 @@ pub fn parse_to_typed(
                         field_name
                     ))
                 })?;
+                // TODO: Fix the DateTime parsing, test is failing
                 let dt = DateTime::parse_from_rfc3339(s).map_err(|e| {
                     log::error!("Field '{}' not a valid DateTime: {}", field_name, e);
                     PipelineError::ParseError(format!(
