@@ -2,22 +2,22 @@
 // deduplicates them in parallel, and prepares atomic daily batches.
 // It also implements recovery if a crash occurs (e.g., by reading checkpoints).
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio::task; // added for async trait support
-use std::collections::HashMap;
 
 use crate::config::DeltaConfig;
 use crate::handlers::PipelineError::{FlushError, InsertError};
 use crate::handlers::{AppError, AppResult, DeltaError, PipelineError};
+use crate::model::{MessageRecordTyped, TypedValue};
 use crate::monitoring::Monitoring;
-use crate::model::{MessageRecord, TypedValue};
-
+use crate::utils::parse_to_typed;
 
 /// Buffer used for consolidating messages
 #[derive(Debug)]
 struct InMemoryAggregator {
-    records: BTreeMap<i64, MessageRecord>,
+    records: BTreeMap<i64, MessageRecordTyped>,
     seen_offsets: HashSet<i64>,
     seen_keys: HashSet<String>,
     counter: usize, // new counter field
@@ -33,7 +33,7 @@ impl InMemoryAggregator {
         }
     }
 
-    fn insert(&mut self, record: MessageRecord) -> Result<(), PipelineError> {
+    fn insert(&mut self, record: MessageRecordTyped) -> Result<(), PipelineError> {
         if self.seen_offsets.contains(&record.offset) {
             return Err(InsertError(format!("Duplicate offset {}", record.offset)));
         }
@@ -54,7 +54,7 @@ impl InMemoryAggregator {
         Ok(())
     }
 
-    fn drain(&mut self) -> Vec<MessageRecord> {
+    fn drain(&mut self) -> Vec<MessageRecordTyped> {
         let batch = self.records.values().cloned().collect();
         self.records.clear();
         self.seen_offsets.clear();
@@ -92,7 +92,7 @@ pub trait PipelineTrait {
         &self,
         offset: i64,
         key: Option<String>,
-        payload: HashMap<String, TypedValue>,
+        payload: String,
     ) -> AppResult<()>;
 
     // Asynchronously flush the pipeline data
@@ -109,13 +109,31 @@ impl<'a> PipelineTrait for Pipeline<'a> {
         &self,
         offset: i64,
         key: Option<String>,
-        payload: HashMap<String, TypedValue>,
+        payload: String,
     ) -> AppResult<()> {
-        let record = MessageRecord {
+        // Parse the incoming string as JSON:
+        let parsed_json: serde_json::Value = serde_json::from_str(&payload)
+            .map_err(|e| PipelineError::ParseError(format!("Invalid JSON: {e}")))?;
+
+        // If there is a schema in config, apply parse_to_typed
+        let typed_fields = if let Some(field_configs) = &self.delta_config.schema {
+            parse_to_typed(&parsed_json, field_configs)?
+        } else {
+            // Deal with no schema, treat all columns as strings
+            let mut typed_fields = HashMap::new();
+            for (key, value) in parsed_json.as_object().unwrap() {
+                typed_fields.insert(key.clone(), TypedValue::String(value.to_string()));
+            }
+            typed_fields
+        };
+
+        // Build the record with typed fields
+        let record = MessageRecordTyped {
             offset,
             key,
-            payload,
+            payload: typed_fields,
         };
+
         let aggregator = self.aggregator.clone();
 
         log::debug!("Inserting record: {:?}", record);
@@ -182,7 +200,8 @@ impl<'a> PipelineTrait for Pipeline<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio;
+    use std::collections::HashMap;
+    use tokio; // added for payload hashmap
 
     // Updated helper for creating a pipeline instance for tests.
     fn create_pipeline() -> Pipeline<'static> {
@@ -190,6 +209,7 @@ mod tests {
             table_path: "dummy".to_string(),
             mode: "default".to_string(),
             partition: "default".to_string(),
+            schema: None,
         }));
         Pipeline::new(config, None)
     }
@@ -197,8 +217,9 @@ mod tests {
     #[tokio::test]
     async fn test_insert_record_unique() {
         let pipeline = create_pipeline();
+        let payload = r#"{"dummy": "payload1"}"#.to_string(); // changed to valid JSON
         let res = pipeline
-            .insert_record(1, Some("a".to_string()), "payload1".to_string())
+            .insert_record(1, Some("a".to_string()), payload)
             .await;
         assert!(res.is_ok());
         assert_eq!(pipeline.aggregator_len(), 1);
@@ -207,14 +228,16 @@ mod tests {
     #[tokio::test]
     async fn test_insert_record_duplicate_offset() {
         let pipeline = create_pipeline();
+        let payload1 = r#"{"dummy": "payload1"}"#.to_string();
+        let payload2 = r#"{"dummy": "payload2"}"#.to_string();
         assert!(
             pipeline
-                .insert_record(1, Some("a".to_string()), "payload1".to_string())
+                .insert_record(1, Some("a".to_string()), payload1)
                 .await
                 .is_ok()
         );
         let res = pipeline
-            .insert_record(1, Some("b".to_string()), "payload2".to_string())
+            .insert_record(1, Some("b".to_string()), payload2)
             .await;
         assert!(res.is_err());
     }
@@ -222,14 +245,16 @@ mod tests {
     #[tokio::test]
     async fn test_insert_record_duplicate_key() {
         let pipeline = create_pipeline();
+        let payload1 = r#"{"dummy": "payload1"}"#.to_string();
+        let payload2 = r#"{"dummy": "payload2"}"#.to_string();
         assert!(
             pipeline
-                .insert_record(1, Some("a".to_string()), "payload1".to_string())
+                .insert_record(1, Some("a".to_string()), payload1)
                 .await
                 .is_ok()
         );
         let res = pipeline
-            .insert_record(2, Some("a".to_string()), "payload2".to_string())
+            .insert_record(2, Some("a".to_string()), payload2)
             .await;
         assert!(res.is_err());
     }
@@ -238,12 +263,14 @@ mod tests {
     #[tokio::test]
     async fn test_flush_empty_the_aggregator() {
         let pipeline = create_pipeline();
+        let payload1 = r#"{"dummy": "payload1"}"#.to_string();
+        let payload2 = r#"{"dummy": "payload2"}"#.to_string();
         pipeline
-            .insert_record(1, Some("a".to_string()), "payload1".to_string())
+            .insert_record(1, Some("a".to_string()), payload1)
             .await
             .unwrap();
         pipeline
-            .insert_record(2, Some("b".to_string()), "payload2".to_string())
+            .insert_record(2, Some("b".to_string()), payload2)
             .await
             .unwrap();
         assert_eq!(pipeline.aggregator_len(), 2);
@@ -255,19 +282,29 @@ mod tests {
     #[test]
     fn test_inmemory_aggregator_insert_and_len() {
         let mut aggregator = InMemoryAggregator::new();
-        let record = MessageRecord {
+        let mut payload = HashMap::new();
+        payload.insert(
+            "dummy".to_string(),
+            TypedValue::String("payload".to_string()),
+        );
+        let record = MessageRecordTyped {
             offset: 1,
             key: Some("a".to_string()),
-            payload: "payload".to_string(),
+            payload, // using hashmap payload
         };
         assert!(aggregator.insert(record).is_ok());
         assert_eq!(aggregator.len(), 1);
 
         // Test duplicate offset insertion
-        let dup_offset = MessageRecord {
+        let mut payload_dup = HashMap::new();
+        payload_dup.insert(
+            "dummy".to_string(),
+            TypedValue::String("payload2".to_string()),
+        );
+        let dup_offset = MessageRecordTyped {
             offset: 1,
             key: Some("b".to_string()),
-            payload: "payload2".to_string(),
+            payload: payload_dup,
         };
         assert!(aggregator.insert(dup_offset).is_err());
     }
@@ -275,15 +312,25 @@ mod tests {
     #[test]
     fn test_inmemory_aggregator_drain() {
         let mut aggregator = InMemoryAggregator::new();
-        let record1 = MessageRecord {
+        let mut payload1 = HashMap::new();
+        payload1.insert(
+            "dummy".to_string(),
+            TypedValue::String("payload1".to_string()),
+        );
+        let mut payload2 = HashMap::new();
+        payload2.insert(
+            "dummy".to_string(),
+            TypedValue::String("payload2".to_string()),
+        );
+        let record1 = MessageRecordTyped {
             offset: 1,
             key: Some("a".to_string()),
-            payload: "payload1".to_string(),
+            payload: payload1,
         };
-        let record2 = MessageRecord {
+        let record2 = MessageRecordTyped {
             offset: 2,
             key: Some("b".to_string()),
-            payload: "payload2".to_string(),
+            payload: payload2,
         };
         aggregator.insert(record1).unwrap();
         aggregator.insert(record2).unwrap();

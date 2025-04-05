@@ -12,10 +12,25 @@ use crate::handlers::{AppResult, ConfigError};
 pub struct MessageRecord {
     pub offset: i64,
     pub key: Option<String>,
-    pub payload: HashMap<String, TypedValue>,
+    pub payload: String,
 }
 
 impl PartialEq for MessageRecord {
+    fn eq(&self, other: &Self) -> bool {
+        // Decide which fields define "duplicate." 
+        // This case uses offset + key combined:
+        self.offset == other.offset && self.key == other.key
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MessageRecordTyped {
+    pub offset: i64,
+    pub key: Option<String>,
+    pub payload: HashMap<String, TypedValue>,
+}
+
+impl PartialEq for MessageRecordTyped {
     fn eq(&self, other: &Self) -> bool {
         // Decide which fields define "duplicate." 
         // This case uses offset + key combined:
@@ -81,7 +96,7 @@ pub enum FieldType {
 }
 
 /// An enum to hold typed field values
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TypedValue {
     Null, // For null values
     U64(u64),

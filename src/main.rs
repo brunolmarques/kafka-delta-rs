@@ -11,7 +11,7 @@ mod logging;
 mod monitoring;
 mod pipeline;
 mod model;
-mod util;
+mod utils;
 
 use std::env;
 use std::sync::Arc;
