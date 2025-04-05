@@ -48,25 +48,36 @@ impl<'a> KafkaProducer<'a> {
         key: Option<String>,
         payload: String,
     ) -> AppResult<()> {
-        let record = FutureRecord::to(&self.dead_letter_topic)
-            .key(key.as_deref().unwrap_or(""))
-            .payload(&payload);
+        let mut attempts = 0;
+        let max_attempts = 3;
+        loop {
+            let record = FutureRecord::to(&self.dead_letter_topic)
+                .key(key.as_deref().unwrap_or(""))
+                .payload(&payload);
 
-        self.producer
-            .send(record, Duration::from_secs(0))
-            .await
-            .map_err(|e| {
-                log::error!("Failed to send to dead letter topic: {e:?}");
-                AppError::Kafka(KafkaError::CommunicationLost(format!(
-                    "Failed to send to dead letter topic: {e:?}"
-                )))
-            })?;
-
-        if let Some(monitoring) = &self.monitoring {
-            monitoring.record_dead_letters(1);
+            match self.producer.send(record, Duration::from_secs(0)).await {
+                Ok(_) => {
+                    if let Some(monitoring) = self.monitoring {
+                        monitoring.record_dead_letters(1);
+                    }
+                    log::info!("Successfully sent {} to dead letter topic", payload);
+                    return Ok(())
+                },
+                Err(e) => {
+                    attempts += 1;
+                    log::error!("Attempt {attempts}: Failed to send to dead letter topic: {e:?}");
+                    if attempts >= max_attempts {
+                        log::error!("Max attempts reached. Giving up.");
+                        return Err(AppError::Kafka(KafkaError::CommunicationLost(format!(
+                            "Failed after {} attempts: {e:?}",
+                            attempts
+                        ))));
+                    }
+                    // Delay before retrying
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            }
         }
-
-        Ok(())
     }
 }
 
@@ -183,16 +194,33 @@ impl<'a, T: PipelineTrait> KafkaConsumer<'a, T> {
                 // Flush the aggregator and, if successful, commit the consumer state.
                 // This guarantees idempotency in case of failure.
                 self.pipeline.flush().await?;
-                self.consumer
-                    .commit_consumer_state(CommitMode::Async)
-                    .map_err(|e| {
-                        log::error!("Commit failed: {e}");
-                        AppError::Kafka(KafkaError::CommunicationLost(format!(
-                            "Commit failed: {e}"
-                        )))
-                    })?;
-                if let Some(monitoring) = &self.monitoring {
-                    monitoring.record_kafka_commit();
+
+                let mut attempts = 0;
+                let max_attempts = 3;
+
+                loop {
+                    match self.consumer.commit_consumer_state(CommitMode::Async) {
+                        Ok(_) => {
+                            if let Some(monitoring) = self.monitoring {
+                                monitoring.record_kafka_commit();
+                            }
+                            log::info!("Successfully committed consumer state.");
+                            break;
+                        }
+                        Err(e) => {
+                            attempts += 1;
+                            log::error!("Attempt {attempts}: Commit failed: {e:?}");
+                            if attempts >= max_attempts {
+                                log::error!("Max attempts reached. Giving up.");
+                                return Err(AppError::Kafka(KafkaError::CommunicationLost(format!(
+                                    "Commit failed after {} attempts: {e:?}",
+                                    attempts
+                                ))));
+                            }
+                            // Delay before retrying
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                        }
+                    }
                 }
                 log::info!("Flushed and committed successfully.");
                 last_flush = Instant::now();
