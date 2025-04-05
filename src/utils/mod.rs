@@ -45,9 +45,9 @@ pub fn parse_json_value(value: &Value) -> TypedValue {
 
 /// Parse a JSON object according to field configs
 /*
- Why Return a Map Instead of a Struct?
+ Why Return a HashMap Instead of a Struct?
 
-When the schema is not fully known at compile time, storing the parsed fields in a Map<String, TypedValue>
+When the schema is not fully known at compile time, storing the parsed fields in a HashMap<String, TypedValue>
 can be a convenient way to preserve some dynamism. For each field in the YAML-configured schema, it's possible
 to parse a value from the JSON and store it by name. This means that the code doesn’t require a fixed set of fields
 or a dedicated Rust struct matching that set. Instead, relying on a “field definition” from the config.

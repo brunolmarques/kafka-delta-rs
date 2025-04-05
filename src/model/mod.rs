@@ -9,21 +9,6 @@ use crate::handlers::{AppResult, ConfigError};
 //--------------------------------- Kafka Message -------------------------------------
 
 #[derive(Debug, Clone)]
-pub struct MessageRecord {
-    pub offset: i64,
-    pub key: Option<String>,
-    pub payload: String,
-}
-
-impl PartialEq for MessageRecord {
-    fn eq(&self, other: &Self) -> bool {
-        // Decide which fields define "duplicate." 
-        // This case uses offset + key combined:
-        self.offset == other.offset && self.key == other.key
-    }
-}
-
-#[derive(Debug, Clone)]
 pub struct MessageRecordTyped {
     pub offset: i64,
     pub key: Option<String>,
@@ -38,9 +23,9 @@ impl PartialEq for MessageRecordTyped {
     }
 }
 
-impl Eq for MessageRecord {}
+impl Eq for MessageRecordTyped {}
 
-impl Hash for MessageRecord {
+impl Hash for MessageRecordTyped {
     fn hash<H: Hasher>(&self, state: &mut H) {
         // Must match the fields used in PartialEq.
         self.offset.hash(state);
@@ -55,6 +40,7 @@ impl Hash for MessageRecord {
 
 
 //--------------------------------- Delta Schema -------------------------------------
+
 
 #[derive(Debug, Deserialize)]
 pub struct FieldConfig {

@@ -22,6 +22,7 @@ pub struct AppConfig {
 pub struct KafkaConfig {
     pub broker: String,
     pub topics: Vec<String>,
+    pub dead_letter_topic: Option<String>, // Optional: for dead letter queue
     pub group_id: String,
     pub timeout: Option<u64>, // Optional: timeout for Kafka operations, default is 5000ms
 }

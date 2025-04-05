@@ -25,6 +25,7 @@ pub struct Monitoring {
     message_size_counter: Counter<u64>,
     kafka_commit_counter: Counter<u64>,
     offset_lag_gauge: UpDownCounter<i64>,
+    dead_letters_counter: Counter<u64>,
     delta_write_counter: Counter<u64>,
     delta_flush_histogram: Histogram<f64>,
 }
@@ -106,6 +107,11 @@ impl Monitoring {
             .with_description("Tracks the offset lag behind the latest committed offset")
             .build();
 
+        let dead_letters_counter = meter
+            .u64_counter("kafka_dead_letters")
+            .with_description("Number of messages sent to dead letter topic")
+            .build();
+
         let delta_write_counter = meter
             .u64_counter("delta_messages_written")
             .with_description("Number of messages/records written to Delta table")
@@ -122,6 +128,7 @@ impl Monitoring {
             message_size_counter,
             kafka_commit_counter,
             offset_lag_gauge,
+            dead_letters_counter,
             delta_write_counter,
             delta_flush_histogram,
         })
@@ -140,6 +147,7 @@ impl Monitoring {
             message_size_counter: no_op_counter.clone(),
             kafka_commit_counter: no_op_counter.clone(),
             offset_lag_gauge: no_op_up_down,
+            dead_letters_counter: no_op_counter.clone(),
             delta_write_counter: no_op_counter,
             delta_flush_histogram: no_op_histogram,
         }
@@ -171,6 +179,14 @@ impl Monitoring {
     pub fn set_kafka_offset_lag(&self, lag: i64) {
         self.offset_lag_gauge
             .add(lag, &[KeyValue::new("kafka_offset_lag", "offset_value")]);
+    }
+
+    /// Record number of messages sent to dead letter topic.
+    pub fn record_dead_letters(&self, count: u64) {
+        self.dead_letters_counter.add(count, &[KeyValue::new(
+            "kafka_dead_letters",
+            "dead_letters_count",
+        )]);
     }
 
     /// Record number of messages/records written to Delta.

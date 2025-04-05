@@ -15,12 +15,28 @@ use crate::monitoring::Monitoring;
 use crate::utils::parse_to_typed;
 
 /// Buffer used for consolidating messages
+/// Example of the aggregator:
+/// ```
+/// InMemoryAggregator {
+///     counter: 2
+///     seen_offsets: {1, 2, 3}
+///     seen_keys: {"a", "b","c"}
+///     records: {
+///         1: {offset: 1, key: "a", payload: {1: {"string": "payload1"}}},
+///         2: {offset: 2, key: "b", payload: {2: {"u64": 452}}},
+///         3: {offset: 3, key: "c", payload: {3: {"f64": 923.23}}},
+///     }
+/// }
+/// ```
+/// The `InMemoryAggregator` is a simple in-memory data structure
+/// that stores messages with unique offsets and keys.
+/// It uses a BTreeMap for ordered storage and HashSet for fast lookups.
 #[derive(Debug)]
 struct InMemoryAggregator {
-    records: BTreeMap<i64, MessageRecordTyped>,
+    records: BTreeMap<i64, HashMap<String,TypedValue>>,
     seen_offsets: HashSet<i64>,
     seen_keys: HashSet<String>,
-    counter: usize, // new counter field
+    counter: usize, 
 }
 
 impl InMemoryAggregator {
@@ -35,26 +51,29 @@ impl InMemoryAggregator {
 
     fn insert(&mut self, record: MessageRecordTyped) -> Result<(), PipelineError> {
         if self.seen_offsets.contains(&record.offset) {
-            return Err(InsertError(format!("Duplicate offset {}", record.offset)));
+            log::warn!("Duplicate offset {} - skipping insertion", record.offset);
+            return Ok(());
         }
 
         if let Some(ref key) = record.key {
             if self.seen_keys.contains(key) {
-                return Err(InsertError(format!("Duplicate key {}", key)));
+                log::warn!("Duplicate key {} - skipping insertion", key);
+                return Ok(());
             }
         }
 
         self.seen_offsets.insert(record.offset);
+
         if let Some(ref k) = record.key {
             self.seen_keys.insert(k.clone());
         }
-        self.records.insert(record.offset, record);
+        self.records.insert(record.offset, record.payload);
         self.counter += 1; // increment counter after successful insert
 
         Ok(())
     }
 
-    fn drain(&mut self) -> Vec<MessageRecordTyped> {
+    fn drain(&mut self) -> Vec<HashMap<String,TypedValue>> {
         let batch = self.records.values().cloned().collect();
         self.records.clear();
         self.seen_offsets.clear();
