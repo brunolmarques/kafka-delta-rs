@@ -5,12 +5,13 @@ use async_trait::async_trait;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio::task; // added for async trait support
+use std::collections::HashMap;
 
 use crate::config::DeltaConfig;
 use crate::handlers::PipelineError::{FlushError, InsertError};
 use crate::handlers::{AppError, AppResult, DeltaError, PipelineError};
 use crate::monitoring::Monitoring;
-use crate::model::MessageRecord;
+use crate::model::{MessageRecord, TypedValue};
 
 
 /// Buffer used for consolidating messages
@@ -91,7 +92,7 @@ pub trait PipelineTrait {
         &self,
         offset: i64,
         key: Option<String>,
-        payload: String,
+        payload: HashMap<String, TypedValue>,
     ) -> AppResult<()>;
 
     // Asynchronously flush the pipeline data
@@ -108,7 +109,7 @@ impl<'a> PipelineTrait for Pipeline<'a> {
         &self,
         offset: i64,
         key: Option<String>,
-        payload: String,
+        payload: HashMap<String, TypedValue>,
     ) -> AppResult<()> {
         let record = MessageRecord {
             offset,

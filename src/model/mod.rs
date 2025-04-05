@@ -68,29 +68,29 @@ impl FieldConfig {
 #[serde(rename_all = "lowercase")] 
 // ^ optional convenience for YAML like `type: "string"`
 pub enum FieldType {
+    Null,
     U64,
-    U32,
     I64,
-    I32,
     F64,
-    F32,
     Bool,
     String,
     DateTime,
+    Array,
+    HashMap,
     // add more if needed (Bool, f64, etc.)
 }
 
 /// An enum to hold typed field values
 #[derive(Debug, Clone)]
 pub enum TypedValue {
+    Null, // For null values
     U64(u64),
-    U32(u32),
     I64(i64),
-    I32(i32),
     F64(f64),
-    F32(f32),
     Bool(bool),
     String(String),
     DateTime(DateTime<Utc>),
+    Array(Vec<TypedValue>), // For array of typed values
+    Object(HashMap<String, TypedValue>), // For JSON objects
     // More variants as needed (bool, float, etc.)
 }
