@@ -35,7 +35,7 @@ opentelemetry-otlp = "0.29"
 opentelemetry_sdk = "0.29"
 
 # Delta Lake integration using deltalake
-deltalake = "0.25"
+deltalake = { version = "0.25.0", features = ["datafusion"] }
 chrono = "0.4"
 
 # For error handling with custom error types

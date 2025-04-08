@@ -5,10 +5,10 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
-use tokio::task; // added for async trait support
+use tokio::task; 
 
 use crate::config::DeltaConfig;
-use crate::handlers::PipelineError::{FlushError, InsertError};
+use crate::handlers::PipelineError::FlushError;
 use crate::handlers::{AppResult, DeltaError, PipelineError};
 use crate::model::{MessageRecordTyped, TypedValue};
 use crate::monitoring::Monitoring;
@@ -22,9 +22,9 @@ use crate::utils::parse_to_typed;
 ///     seen_offsets: {1, 2, 3}
 ///     seen_keys: {"a", "b","c"}
 ///     records: {
-///         1: {offset: 1, key: "a", payload: {1: {"string": "payload1"}}},
-///         2: {offset: 2, key: "b", payload: {2: {"u64": 452}}},
-///         3: {offset: 3, key: "c", payload: {3: {"f64": 923.23}}},
+///         1: {offset: 1, key: "a", payload: {1: {"user_name": String("payload1"), "id": U64(4732)}}},
+///         2: {offset: 2, key: "b", payload: {2: {"user_name": String("payload2"), "id": U64(952)}}},
+///         3: {offset: 3, key: "c", payload: {3: {"user_name": String("payload3"), "id": U64(2490)}}},
 ///     }
 /// }
 /// ```
@@ -226,13 +226,14 @@ impl<'a> PipelineTrait for Pipeline<'a> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use tokio; // added for payload hashmap
+    use tokio; 
+    use crate::delta::DeltaWriteMode;
 
     // Updated helper for creating a pipeline instance for tests.
     fn create_pipeline() -> Pipeline<'static> {
         let config = Box::leak(Box::new(DeltaConfig {
             table_path: "dummy".to_string(),
-            mode: "default".to_string(),
+            mode: DeltaWriteMode::Insert,
             partition: "default".to_string(),
             schema: None,
         }));

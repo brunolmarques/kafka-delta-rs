@@ -68,6 +68,23 @@ Lose the type safety of a compile-time struct. Access to a field is always somet
 returning an Option<&TypedValue> rather than a strongly typed field. Require handling arrays, nested objects, etc.
 case-by-case, often by adding more variants to TypedValue or storing them as JSON again.
 */
+/// Output example:
+/// ```json
+/// {
+///     "user_id": U64(123),
+///     "user_name": String("John Doe"),
+///     "is_active": Bool(true),
+///     "created_at": DateTime("2023-10-12T00:00:00Z"),
+///     "preferences": Array([
+///         String("dark_mode"),
+///         String("notifications")
+///     ]),
+///     "metadata": HashMap({
+///         "key1": String("value1"),
+///         "key2": U64(42)
+///     })
+/// }
+/// ```
 pub fn parse_to_typed(
     json_value: &Value,
     field_configs: &[FieldConfig],

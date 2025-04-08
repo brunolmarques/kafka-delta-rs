@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::handlers::{AppResult, ConfigError};
 use crate::model::FieldConfig;
+use crate::delta::DeltaWriteMode;
 
 #[derive(Debug, Deserialize)]
 pub struct AppConfig {
@@ -31,7 +32,7 @@ pub struct KafkaConfig {
 pub struct DeltaConfig {
     pub table_path: String,
     pub partition: String,
-    pub mode: String,
+    pub mode: DeltaWriteMode,  // Supported modes: "UPSERT" or "INSERT"
     pub schema: Option<Vec<FieldConfig>>,
 }
 
@@ -45,7 +46,6 @@ pub struct MonitoringConfig {
     /// Whether or not monitoring is enabled
     pub enabled: bool,
     pub service_name: String,
-
     /// Pull-based endpoint for metrics
     pub endpoint: String, // e.g., "/metrics"
 }
