@@ -1,6 +1,6 @@
 use arrow::array::{
-    ArrayBuilder, ArrayRef, BooleanBuilder, Float64Builder, Int64Builder,
-    ListBuilder, MapBuilder, NullBuilder, StringBuilder, TimestampMicrosecondBuilder,
+    ArrayBuilder, ArrayRef, BooleanBuilder, Float64Builder, Int64Builder, ListBuilder, MapBuilder,
+    NullBuilder, StringBuilder, TimestampMicrosecondBuilder, UInt64Builder,
 };
 use arrow::datatypes::{DataType, Field, Fields, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use crate::handlers::{AppResult, PipelineError};
+use crate::handlers::{AppError, AppResult, PipelineError};
 use crate::model::{FieldConfig, FieldType};
 use crate::model::{KeyFieldType, KeyValue, TypedValue};
 
@@ -33,7 +33,7 @@ macro_rules! parse_json_field {
 //------------------------------- Type Parsing -------------------------------------
 
 /// Parse a single JSON Value into a TypedValue, given a FieldType definition.
-pub fn parse_field_value(
+fn parse_field_value(
     raw_value: &Value,
     field_type: &FieldType,
 ) -> Result<TypedValue, PipelineError> {
@@ -404,12 +404,10 @@ mod type_parsing_tests {
     }
 }
 
-
 //-------------------------------------------- Arrow Utils ------------------------------------------
 
-
 // Parse a FieldConfig into a DataType recursively
-pub fn parse_field_config(field_type: &FieldType) -> DataType {
+fn parse_field_config(field_type: &FieldType) -> DataType {
     match field_type {
         FieldType::Null => DataType::Null,
         FieldType::U64 => DataType::UInt64,
@@ -425,7 +423,7 @@ pub fn parse_field_config(field_type: &FieldType) -> DataType {
         FieldType::HashMap {
             key_type,
             value_type,
-        } => { 
+        } => {
             let parsed_key_type = match **key_type {
                 KeyFieldType::U64 => DataType::UInt64,
                 KeyFieldType::I64 => DataType::Int64,
@@ -434,25 +432,65 @@ pub fn parse_field_config(field_type: &FieldType) -> DataType {
                 KeyFieldType::DateTime => DataType::Timestamp(TimeUnit::Microsecond, None),
             };
             DataType::Map(
-            Arc::new(Field::new(
-                "key", 
-                DataType::Struct(Fields::from(vec![
-                    Field::new("key", parsed_key_type, false), 
-                    Field::new("value", parse_field_config(value_type), false)
-                    ])), 
-                false
-            )),
-            true,
-        )},
+                Arc::new(Field::new(
+                    "map",
+                    DataType::Struct(Fields::from(vec![
+                        Field::new("key", parsed_key_type, false),
+                        Field::new("value", parse_field_config(value_type), false),
+                    ])),
+                    false,
+                )),
+                true,
+            )
+        }
     }
 }
 
 pub fn build_arrow_schema_from_config(field_configs: &[FieldConfig]) -> Arc<Schema> {
-    let fields = field_configs
+    let fields: Vec<Field> = field_configs
         .iter()
         .map(|fc| Field::new(fc.field.clone(), parse_field_config(&fc.type_name), true))
         .collect();
     Arc::new(Schema::new(fields))
+}
+
+fn create_builder_from_data_type(data_type: &DataType) -> Box<dyn ArrayBuilder> {
+    match data_type {
+        DataType::Null => Box::new(NullBuilder::new()),
+        DataType::Int64 => Box::new(Int64Builder::new()),
+        DataType::Utf8 => Box::new(StringBuilder::new()),
+        DataType::Float64 => Box::new(Float64Builder::new()),
+        DataType::Boolean => Box::new(BooleanBuilder::new()),
+        DataType::Timestamp(TimeUnit::Microsecond, None) => {
+            Box::new(TimestampMicrosecondBuilder::new())
+        }
+        DataType::List(inner_type) => {
+            let inner_builder = create_builder_from_data_type(inner_type.data_type());
+            Box::new(ListBuilder::new(inner_builder))
+        }
+        DataType::Map(entries, _sorted) => {
+            let (key_type, value_type) = match entries.data_type() {
+                DataType::Struct(fields) => {
+                    let key_type = fields.get(0).unwrap().data_type();
+                    let value_type = fields.get(1).unwrap().data_type();
+                    (key_type, value_type)
+                }
+                _ => {
+                    log::error!("Invalid map entry type: {:?}", entries.data_type());
+                    panic!("Invalid map entry type: {:?}", entries.data_type());
+                }
+            };
+            Box::new(MapBuilder::new(
+                None,
+                create_builder_from_data_type(key_type),
+                create_builder_from_data_type(value_type),
+            ))
+        }
+        _ => {
+            log::error!("Unsupported data type: {:?}", data_type);
+            panic!("Unsupported data type: {:?}", data_type);
+        }
+    }
 }
 
 pub fn build_record_batch_from_btreemap(
@@ -461,33 +499,9 @@ pub fn build_record_batch_from_btreemap(
 ) -> AppResult<RecordBatch> {
     // For each field in the schema, create a corresponding array builder.
     let mut builders: Vec<Box<dyn ArrayBuilder>> = Vec::new();
+
     for field in arrow_schema.fields().iter() {
-        let builder: Box<dyn ArrayBuilder> = match field.data_type() {
-            arrow::datatypes::DataType::Null => Box::new(NullBuilder::new()),
-            arrow::datatypes::DataType::Int64 => Box::new(Int64Builder::new()),
-            arrow::datatypes::DataType::Utf8 => Box::new(StringBuilder::new()),
-            arrow::datatypes::DataType::Float64 => Box::new(Float64Builder::new()),
-            arrow::datatypes::DataType::Boolean => Box::new(BooleanBuilder::new()),
-            arrow::datatypes::DataType::Timestamp(TimeUnit::Microsecond, None) => {
-                Box::new(TimestampMicrosecondBuilder::new())
-            }
-            arrow::datatypes::DataType::List(inner_type) => Box::new(ListBuilder::new(
-                build_record_batch_from_btreemap(arrow_schema, inner_type),
-            )),
-            arrow::datatypes::DataType::Map(key_type, value_type) => Box::new(MapBuilder::new(
-                create_builder_from_data_type(key_type.data_type()),
-                create_builder_from_data_type(value_type.data_type()),
-                data.len(),
-            )),
-            _ => {
-                log::error!("Unsupported data type: {:?}", field.data_type());
-                return Err(PipelineError::ParseError(format!(
-                    "Unsupported data type: {:?}",
-                    field.data_type()
-                ))
-                .into());
-            }
-        };
+        let builder: Box<dyn ArrayBuilder> = create_builder_from_data_type(field.data_type());
         builders.push(builder);
     }
 
@@ -499,18 +513,144 @@ pub fn build_record_batch_from_btreemap(
                 .fields()
                 .iter()
                 .position(|f| f.name() == field_name)
-                .unwrap();
+                .unwrap_or_else(|| {
+                    log::error!("Field not found: {}", field_name);
+                    panic!("Field not found: {}", field_name);
+                });
+
             let builder = builders[field_index].as_mut();
             match value {
-                TypedValue::Null => builder.append_null(),
-                TypedValue::U64(value) => builder.append(value),
-                TypedValue::I64(value) => builder.append(value),
-                TypedValue::F64(value) => builder.append(value),
-                TypedValue::Bool(value) => builder.append(value),
-                TypedValue::String(value) => builder.append(value),
-                TypedValue::DateTime(value) => builder.append(value),
-                TypedValue::Array(value) => builder.append(value),
-                TypedValue::Object(value) => builder.append(value),
+                TypedValue::Null => {
+                    if let Some(b) = builder.as_any().downcast_mut::<NullBuilder>() {
+                        b.append_null();
+                    }
+                }
+                TypedValue::U64(value) => {
+                    if let Some(b) = builder.as_any().downcast_mut::<UInt64Builder>() {
+                        b.append_value(*value);
+                    }
+                }
+                TypedValue::I64(value) => {
+                    if let Some(b) = builder.as_any().downcast_mut::<Int64Builder>() {
+                        b.append_value(*value);
+                    }
+                }
+                TypedValue::F64(value) => {
+                    if let Some(b) = builder.as_any().downcast_mut::<Float64Builder>() {
+                        b.append_value(*value);
+                    }
+                }
+                TypedValue::Bool(value) => {
+                    if let Some(b) = builder.as_any().downcast_mut::<BooleanBuilder>() {
+                        b.append_value(*value);
+                    }
+                }
+                TypedValue::String(value) => {
+                    if let Some(b) = builder.as_any().downcast_mut::<StringBuilder>() {
+                        b.append_value(value);
+                    }
+                }
+                TypedValue::DateTime(value) => {
+                    if let Some(b) = builder
+                        .as_any()
+                        .downcast_mut::<TimestampMicrosecondBuilder>()
+                    {
+                        b.append_value(value.timestamp_micros());
+                    }
+                }
+                TypedValue::Array(value) => {
+                    if let Some(b) = builder.as_any().downcast_mut::<ListBuilder<_>>() {
+                        // Start a new list
+                        b.append(true);
+
+                        // Get the inner builder
+                        let inner_builder: &mut dyn ArrayBuilder = b.values();
+
+                        // Append each element
+                        // TODO: Check if it's possible to use recursive function here
+                        for item in value {
+                            match item {
+                                TypedValue::String(s) => {
+                                    if let Some(sb) =
+                                        inner_builder.as_any().downcast_mut::<StringBuilder>()
+                                    {
+                                        sb.append_value(s);
+                                    }
+                                }
+                                TypedValue::U64(n) => {
+                                    if let Some(ub) =
+                                        inner_builder.as_any().downcast_mut::<UInt64Builder>()
+                                    {
+                                        ub.append_value(n);
+                                    }
+                                }
+                                // Add other types as needed
+                                _ => {
+                                    log::warn!("Unsupported array element type: {:?}", item);
+                                }
+                            }
+                        }
+                    }
+                }
+                TypedValue::Object(value) => {
+                    if let Some(b) = builder
+                        .as_any()
+                        .downcast_mut::<MapBuilder<StringBuilder, StringBuilder>>()
+                    {
+                        // Start a new map
+                        b.append(true);
+
+                        // TODO: Validate this part
+                        // Get the key and value builders
+                        let key_builder = b.keys();
+                        let value_builder = b.values();
+
+                        // Append each key-value pair
+                        for (key, val) in value {
+                            match key {
+                                KeyValue::String(s) => {
+                                    if let Some(sb) =
+                                        key_builder.as_any().downcast_mut::<StringBuilder>()
+                                    {
+                                        sb.append_value(s);
+                                    }
+                                }
+                                KeyValue::U64(n) => {
+                                    if let Some(ub) =
+                                        key_builder.as_any().downcast_mut::<UInt64Builder>()
+                                    {
+                                        ub.append_value(n);
+                                    }
+                                }
+                                // Add other key types as needed
+                                _ => {
+                                    log::warn!("Unsupported map key type: {:?}", key);
+                                }
+                            }
+
+                            match val {
+                                TypedValue::String(s) => {
+                                    if let Some(sb) =
+                                        value_builder.as_any().downcast_mut::<StringBuilder>()
+                                    {
+                                        sb.append_value(s);
+                                    }
+                                }
+                                TypedValue::U64(n) => {
+                                    if let Some(ub) =
+                                        value_builder.as_any().downcast_mut::<UInt64Builder>()
+                                    {
+                                        ub.append_value(n);
+                                    }
+                                }
+                                // Add other value types as needed
+                                _ => {
+                                    log::warn!("Unsupported map value type: {:?}", val);
+                                }
+                            }
+                        }
+                    }
+                }
                 _ => {
                     log::error!("Unsupported value type: {:?}", value);
                     return Err(PipelineError::ParseError(format!(
