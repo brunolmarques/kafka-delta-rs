@@ -15,9 +15,10 @@ pub trait DeltaWriter {
 }
 
 #[derive(Deserialize, Debug, Clone, Copy)]
+#[serde(rename_all = "UPPERCASE")]
 pub enum DeltaWriteMode {
-    Insert,
-    Upsert,
+    INSERT,
+    UPSERT,
     
 }
 

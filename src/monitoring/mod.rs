@@ -7,17 +7,14 @@ use opentelemetry_otlp::{Protocol, WithExportConfig};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering}; 
 
 use crate::config::MonitoringConfig;
 use crate::handlers::{AppError, AppResult, MonitoringError};
 
-
 // Add a static variable to store the meter provider.
 static METER_PROVIDER: OnceLock<SdkMeterProvider> = OnceLock::new();
-static SHUTDOWN_CALLED: AtomicBool = AtomicBool::new(false); // added static flag
 
-/// A handle fo r the telemetry system. Store references to the meter, counters, histograms, etc.
+/// A handle for the telemetry system. Store references to the meter, counters, histograms, etc.
 #[derive(Clone)]
 pub struct Monitoring {
     meter: Meter,
@@ -66,7 +63,6 @@ impl Monitoring {
             })?;
 
         // Create a PeriodicReader that automatically exports metrics on an interval.
-        // By default, it flushes every 60 seconds (customizable).
         let reader = PeriodicReader::builder(metrics_exporter).build();
 
         // Create a meter provider with the OTLP Metric exporter
@@ -75,10 +71,12 @@ impl Monitoring {
             .with_reader(reader)
             .build();
 
-        // Store the meter provider in the static variable.
-        let _ = METER_PROVIDER.set(meter_provider.clone());
+        // Store the meter provider in the static variable and ensure it's set
+        METER_PROVIDER
+            .set(meter_provider.clone())
+            .expect("Failed to set meter provider");
 
-        // Set the global meter provider to the one created.
+        // Set the global meter provider
         global::set_meter_provider(meter_provider.clone());
 
         // Acquire the global meter
@@ -204,25 +202,6 @@ impl Monitoring {
             "flush_time_seconds",
         )]);
     }
-
-    /// Shut down the global meter provider, ensuring final metrics are exported.
-    /// Useful if your application is about to exit and you want to ensure everything is sent.
-    pub fn shutdown() {
-        if let Some(provider) = METER_PROVIDER.get() {
-            match provider.shutdown() {
-                Ok(()) => {
-                    SHUTDOWN_CALLED.store(true, Ordering::SeqCst); // mark shutdown as called
-                }
-                Err(e) => {
-                    log::error!("Failed to shut down metrics: {}", e);
-                    AppError::Monitoring(MonitoringError::ShutdownError(format!(
-                        "Failed to shut down metrics: {}",
-                        e
-                    )));
-                }
-            }
-        }
-    }
 }
 
 //---------------------------------------- Tests ----------------------------------------
@@ -231,7 +210,6 @@ impl Monitoring {
 mod tests {
     use super::*;
     use opentelemetry::global;
-    use std::sync::atomic::Ordering; // added for testing
 
     // Define a helper to create a no-op config.
     fn dummy_no_op_config() -> crate::config::MonitoringConfig {
@@ -275,19 +253,7 @@ mod tests {
         monitor.set_kafka_offset_lag(-3);
         monitor.record_delta_write(5);
         monitor.observe_delta_flush_time(1.2);
-        // Ensure the static meter provider is set.
+        // Ensure the static meter provider is set
         assert!(METER_PROVIDER.get().is_some(), "Meter provider not set");
-    }
-
-    #[test]
-    fn test_shutdown() {
-        // Initialize an enabled monitor to set the static meter provider.
-        let _ = Monitoring::init(&dummy_enabled_config()).expect("init failed");
-        // Call shutdown and ensure it does not panic.
-        Monitoring::shutdown();
-        assert!(
-            SHUTDOWN_CALLED.load(Ordering::SeqCst),
-            "Shutdown was not successful"
-        );
     }
 }

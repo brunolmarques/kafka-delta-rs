@@ -4,9 +4,10 @@
 use serde::Deserialize;
 use std::path::Path;
 
+use crate::delta::DeltaWriteMode;
 use crate::handlers::{AppResult, ConfigError};
 use crate::model::FieldConfig;
-use crate::delta::DeltaWriteMode;
+use crate::model::FieldType;
 
 #[derive(Debug, Deserialize)]
 pub struct AppConfig {
@@ -32,7 +33,7 @@ pub struct KafkaConfig {
 pub struct DeltaConfig {
     pub table_path: String,
     pub partition: String,
-    pub mode: DeltaWriteMode,  // Supported modes: "UPSERT" or "INSERT"
+    pub mode: DeltaWriteMode, // Supported modes: "UPSERT" or "INSERT"
     pub schema: Option<Vec<FieldConfig>>,
 }
 
@@ -114,7 +115,7 @@ impl AppConfig {
             log::error!("Invalid config: delta.table_path is empty");
             return Err(ConfigError::InvalidField("delta.table_path is empty".to_string()).into());
         }
-        
+
         if config.delta.partition.trim().is_empty() {
             log::error!("Invalid config: delta.partition is empty");
             return Err(ConfigError::InvalidField("delta.partition is empty".to_string()).into());
@@ -150,9 +151,9 @@ impl AppConfig {
 
         // If a schema is present, check each field
         if let Some(ref fields) = config.delta.schema {
-          for f in fields {
-              f.validate()?;
-          }
+            for f in fields {
+                f.validate()?;
+            }
         }
 
         log::info!("Configuration file loaded successfully");
@@ -181,6 +182,11 @@ delta:
   table_path: "/data/delta/table"
   partition: "day-time"
   mode: "INSERT"
+  schema:
+    - field: "id"
+      type: "u64"
+    - field: "name"
+      type: "string"
 logging:
   level: "INFO"
 monitoring:
@@ -217,6 +223,17 @@ credentials:
         let yaml = dummy_yaml_config();
         let config: AppConfig = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(config.kafka.broker, "localhost:9092");
+
+        // Check schema fields
+        if let Some(schema) = &config.delta.schema {
+            assert_eq!(schema.len(), 2);
+            assert_eq!(schema[0].field, "id");
+            assert_eq!(schema[0].type_name, FieldType::U64);
+            assert_eq!(schema[1].field, "name");
+            assert_eq!(schema[1].type_name, FieldType::String);
+        } else {
+            panic!("Schema should be present");
+        }
     }
 
     #[test]
@@ -252,7 +269,6 @@ credentials:
         let res = load_config_from_str(&yaml);
         assert!(res.is_err());
         let err = format!("{:?}", res.err().unwrap());
-        // Updated assertion to check the full expected message.
         assert!(err.contains("delta.table_path is empty"));
     }
 
@@ -262,7 +278,6 @@ credentials:
         let res = load_config_from_str(&yaml);
         assert!(res.is_err());
         let err = format!("{:?}", res.err().unwrap());
-        // Updated assertion to check the full expected message.
         assert!(err.contains("delta.partition is empty"));
     }
 

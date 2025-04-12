@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use crate::handlers::{AppError, AppResult, PipelineError};
+use crate::handlers::{AppResult, PipelineError};
 use crate::model::{FieldConfig, FieldType};
 use crate::model::{KeyFieldType, KeyValue, TypedValue};
 
@@ -28,6 +28,15 @@ macro_rules! parse_json_field {
         })?;
         Ok(TypedValue::$variant(value))
     }};
+}
+
+#[macro_export]
+macro_rules! append_to_builder {
+    ($builder:expr, $arrow_type:ident, $value:expr) => {
+        if let Some(b) = $builder.as_any_mut().downcast_mut::<$arrow_type>() {
+            b.append_value($value);
+        }
+    };
 }
 
 //------------------------------- Type Parsing -------------------------------------
@@ -63,19 +72,29 @@ fn parse_field_value(
         }
         FieldType::DateTime => {
             let s = raw_value.as_str().ok_or_else(|| {
-                log::error!(
-                    "Expected DateTime (string), got something else: {}",
-                    &raw_value
-                );
+                log::error!("Expected DateTime (string), got something else: {}", &raw_value);
                 PipelineError::ParseError(format!(
                     "Expected DateTime (string), got something else: {}",
                     raw_value
                 ))
-            })?;
-            let dt = s.parse::<DateTime<Utc>>().map_err(|e| {
-                log::error!("Field '{}' not a valid DateTime: {}", field_type, e);
+            })?
+            .trim();
+            log::debug!("The raw date-time string is -> '{}'", s);
+            println!("DEBUG: about to parse date/time -> '{}'", s);
+            // Print the length
+            println!("DEBUG: s.len() = {}", s.len());
+
+            // Print each character and its byte code
+            for (i, c) in s.chars().enumerate() {
+                println!("Char #{i}: {:?} (U+{:X})", c, c as u32);
+            }
+
+            // Use a format string that accepts optional fractional seconds.
+            let dt_fixed = DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%SZ").map_err(|e| {
+                log::error!("Field '{:?}' not a valid DateTime: {}", field_type, e);
                 PipelineError::ParseError(format!("Invalid DateTime format: {e}"))
             })?;
+            let dt = dt_fixed.with_timezone(&Utc);
             Ok(TypedValue::DateTime(dt))
         }
         FieldType::Array { item_type } => {
@@ -235,13 +254,269 @@ pub fn parse_to_typed(
     Ok(typed_map)
 }
 
-// Tests Type Parsing ------------------------------------------
+//-------------------------------------------- Arrow Utils ------------------------------------------
+
+// Parse a FieldConfig into a DataType recursively
+fn parse_field_config(field_type: &FieldType) -> DataType {
+    match field_type {
+        FieldType::Null => DataType::Null,
+        FieldType::U64 => DataType::UInt64,
+        FieldType::I64 => DataType::Int64,
+        FieldType::F64 => DataType::Float64,
+        FieldType::Bool => DataType::Boolean,
+        FieldType::String => DataType::Utf8,
+        FieldType::DateTime => DataType::Timestamp(TimeUnit::Microsecond, None),
+        FieldType::Array { item_type } => DataType::List(Arc::new(Field::new_list_field(
+            parse_field_config(&*item_type),
+            true,
+        ))),
+        FieldType::HashMap {
+            key_type,
+            value_type,
+        } => {
+            let parsed_key_type = match **key_type {
+                KeyFieldType::U64 => DataType::UInt64,
+                KeyFieldType::I64 => DataType::Int64,
+                KeyFieldType::Bool => DataType::Boolean,
+                KeyFieldType::String => DataType::Utf8,
+                KeyFieldType::DateTime => DataType::Timestamp(TimeUnit::Microsecond, None),
+            };
+            DataType::Map(
+                Arc::new(Field::new(
+                    "map",
+                    DataType::Struct(Fields::from(vec![
+                        Field::new("key", parsed_key_type, false),
+                        Field::new("value", parse_field_config(value_type), false),
+                    ])),
+                    false,
+                )),
+                true,
+            )
+        }
+    }
+}
+
+pub fn build_arrow_schema_from_config(field_configs: &[FieldConfig]) -> Arc<Schema> {
+    let fields: Vec<Field> = field_configs
+        .iter()
+        .map(|fc| Field::new(fc.field.clone(), parse_field_config(&fc.type_name), true))
+        .collect();
+    Arc::new(Schema::new(fields))
+}
+
+fn create_builder_from_data_type(data_type: &DataType) -> Box<dyn ArrayBuilder> {
+    match data_type {
+        DataType::Null => Box::new(NullBuilder::new()),
+        DataType::Int64 => Box::new(Int64Builder::new()),
+        DataType::UInt64 => Box::new(UInt64Builder::new()),
+        DataType::Utf8 => Box::new(StringBuilder::new()),
+        DataType::Float64 => Box::new(Float64Builder::new()),
+        DataType::Boolean => Box::new(BooleanBuilder::new()),
+        DataType::Timestamp(TimeUnit::Microsecond, None) => {
+            Box::new(TimestampMicrosecondBuilder::new())
+        }
+        DataType::List(inner_type) => {
+            let inner_builder = create_builder_from_data_type(inner_type.data_type());
+            Box::new(ListBuilder::new(inner_builder))
+        }
+        DataType::Map(entries, _sorted) => {
+            let (key_type, value_type) = match entries.data_type() {
+                DataType::Struct(fields) => {
+                    let key_type = fields.get(0).unwrap().data_type();
+                    let value_type = fields.get(1).unwrap().data_type();
+                    (key_type, value_type)
+                }
+                _ => {
+                    log::error!("Invalid map entry type: {:?}", entries.data_type());
+                    panic!("Invalid map entry type: {:?}", entries.data_type());
+                }
+            };
+            Box::new(MapBuilder::new(
+                None,
+                create_builder_from_data_type(key_type),
+                create_builder_from_data_type(value_type),
+            ))
+        }
+        _ => {
+            log::error!("Unsupported data type: {:?}", data_type);
+            panic!("Unsupported data type: {:?}", data_type);
+        }
+    }
+}
+
+fn append_value_to_builder(builder: &mut dyn ArrayBuilder, value: &TypedValue) {
+    match value {
+        TypedValue::Null => {
+            if let Some(b) = builder.as_any_mut().downcast_mut::<NullBuilder>() {
+                b.append_null();
+            } else if let Some(b) = builder.as_any_mut().downcast_mut::<UInt64Builder>() {
+                b.append_null();
+            } else if let Some(b) = builder.as_any_mut().downcast_mut::<Int64Builder>() {
+                b.append_null();
+            } else if let Some(b) = builder.as_any_mut().downcast_mut::<Float64Builder>() {
+                b.append_null();
+            } else if let Some(b) = builder.as_any_mut().downcast_mut::<BooleanBuilder>() {
+                b.append_null();
+            } else if let Some(b) = builder.as_any_mut().downcast_mut::<StringBuilder>() {
+                b.append_null();
+            } else if let Some(b) = builder
+                .as_any_mut()
+                .downcast_mut::<TimestampMicrosecondBuilder>()
+            {
+                b.append_null();
+            }
+        }
+        TypedValue::U64(value) => {
+            append_to_builder!(builder, UInt64Builder, *value)
+        }
+        TypedValue::I64(value) => {
+            append_to_builder!(builder, Int64Builder, *value)
+        }
+        TypedValue::F64(value) => {
+            append_to_builder!(builder, Float64Builder, *value)
+        }
+        TypedValue::Bool(value) => {
+            append_to_builder!(builder, BooleanBuilder, *value)
+        }
+        TypedValue::String(value) => {
+            append_to_builder!(builder, StringBuilder, value)
+        }
+        TypedValue::DateTime(value) => {
+            if let Some(b) = builder
+                .as_any_mut()
+                .downcast_mut::<TimestampMicrosecondBuilder>()
+            {
+                b.append_value(value.timestamp_micros());
+            }
+        }
+        TypedValue::Array(value) => {
+            if let Some(b) = builder
+                .as_any_mut()
+                .downcast_mut::<ListBuilder<Box<dyn ArrayBuilder>>>()
+            {
+                // Start a new list
+                b.append(true);
+
+                // Get the inner builder
+                let inner_builder: &mut dyn ArrayBuilder = b.values();
+
+                // Append each element to inner builder
+                for item in value {
+                    append_value_to_builder(inner_builder, item);
+                }
+            }
+        }
+        TypedValue::Object(value) => {
+            if let Some(b) = builder
+                .as_any_mut()
+                .downcast_mut::<MapBuilder<Box<dyn ArrayBuilder>, Box<dyn ArrayBuilder>>>()
+            {
+                // Start a new map
+                let _ = b.append(true);
+
+                // Process each key-value pair
+                for (key, val) in value {
+                    // Handle key
+                    match key {
+                        KeyValue::String(s) => {
+                            if let Some(sb) = b.keys().as_any_mut().downcast_mut::<StringBuilder>()
+                            {
+                                sb.append_value(s);
+                            }
+                        }
+                        KeyValue::U64(n) => {
+                            if let Some(ub) = b.keys().as_any_mut().downcast_mut::<UInt64Builder>()
+                            {
+                                ub.append_value(*n);
+                            }
+                        }
+                        KeyValue::I64(n) => {
+                            if let Some(ib) = b.keys().as_any_mut().downcast_mut::<Int64Builder>() {
+                                ib.append_value(*n);
+                            }
+                        }
+                        KeyValue::Bool(b_val) => {
+                            if let Some(bb) = b.keys().as_any_mut().downcast_mut::<BooleanBuilder>()
+                            {
+                                bb.append_value(*b_val);
+                            }
+                        }
+                        KeyValue::DateTime(dt) => {
+                            if let Some(db) = b
+                                .keys()
+                                .as_any_mut()
+                                .downcast_mut::<TimestampMicrosecondBuilder>()
+                            {
+                                db.append_value(dt.timestamp_micros());
+                            }
+                        }
+                        _ => {
+                            log::warn!("Unsupported map key type: {:?}", key);
+                        }
+                    }
+
+                    // Handle value
+                    append_value_to_builder(b.values(), val);
+                }
+            }
+        }
+    }
+}
+
+pub fn build_record_batch_from_btreemap(
+    arrow_schema: Arc<Schema>,
+    data: &BTreeMap<i64, HashMap<String, TypedValue>>,
+) -> AppResult<RecordBatch> {
+    // For each field in the schema, create a corresponding array builder.
+    let mut builders: Vec<Box<dyn ArrayBuilder>> = Vec::new();
+
+    for field in arrow_schema.fields().iter() {
+        let builder: Box<dyn ArrayBuilder> = create_builder_from_data_type(field.data_type());
+        builders.push(builder);
+    }
+
+    // Iterate over each "row" in the BTreeMap.
+    // For every row, iterate over the schema fields so each builder gets a value.
+    for (_row_key, row_map) in data.iter() {
+        // For each field in the schema (by index)
+        for (field_index, field) in arrow_schema.fields().iter().enumerate() {
+            let builder = builders[field_index].as_mut();
+            if let Some(value) = row_map.get(field.name()) {
+                // Append the value if the field exists in the row.
+                append_value_to_builder(builder, value);
+            } else {
+                // Otherwise, explicitly append a null value.
+                append_value_to_builder(builder, &TypedValue::Null);
+            }
+        }
+    }
+
+    // Once all rows have been appended, build the final Arrow arrays.
+    let mut arrays: Vec<ArrayRef> = Vec::with_capacity(builders.len());
+    for builder in builders.iter_mut() {
+        arrays.push(builder.finish().into());
+    }
+
+    // Create a RecordBatch from the arrays.
+    let record_batch = RecordBatch::try_new(arrow_schema, arrays).map_err(|e| {
+        log::error!("Error creating RecordBatch: {:?}", e);
+        PipelineError::ParseError(format!("Error creating RecordBatch: {:?}", e))
+    })?;
+
+    Ok(record_batch)
+}
+
+//-------------------------------------------- Tests ------------------------------------------
 
 #[cfg(test)]
-mod type_parsing_tests {
+mod tests {
     use super::*;
+    use arrow::array::{Array, StringArray, UInt64Array};
+    use arrow::datatypes::DataType;
     use chrono::Utc;
     use serde_json::{Value, json};
+
+    //-------------------------------------------- Type Parsing Tests ------------------------------------------
 
     #[test]
     fn test_parse_field_value() {
@@ -297,21 +572,22 @@ mod type_parsing_tests {
         );
 
         // Test Array
-        let array = json!([false, 3.14, "test"]);
+        let array = json!(["test1", "test2", "test3"]);
         let item_type = Box::new(FieldType::String);
         let array_type = FieldType::Array { item_type };
         let result = parse_field_value(&array, &array_type);
         match result {
             Ok(TypedValue::Array(items)) => {
                 assert_eq!(items.len(), 3);
-                // Note: In a real test, you'd check the actual values, but since we're using
-                // String as the item_type, the parsing will fail for non-string values
+                assert_eq!(items[0], TypedValue::String("test1".to_string()));
+                assert_eq!(items[1], TypedValue::String("test2".to_string()));
+                assert_eq!(items[2], TypedValue::String("test3".to_string()));
             }
             _ => panic!("Expected Array variant"),
         }
 
         // Test Object (HashMap)
-        let object = json!({"key": "value", "num": 7});
+        let object = json!({"key": "value", "num": "7"});
         let key_type = Box::new(KeyFieldType::String);
         let value_type = Box::new(FieldType::String);
         let map_type = FieldType::HashMap {
@@ -322,7 +598,17 @@ mod type_parsing_tests {
         match result {
             Ok(TypedValue::Object(map)) => {
                 assert_eq!(map.len(), 2);
-                // Note: In a real test, you'd check the actual key-value pairs
+                // Check the actual key-value pairs
+                let key = KeyValue::String("key".to_string());
+                let num_key = KeyValue::String("num".to_string());
+                assert_eq!(
+                    map.get(&key),
+                    Some(&TypedValue::String("value".to_string()))
+                );
+                assert_eq!(
+                    map.get(&num_key),
+                    Some(&TypedValue::String("7".to_string()))
+                );
             }
             _ => panic!("Expected Object variant"),
         }
@@ -391,8 +677,9 @@ mod type_parsing_tests {
             Some(&TypedValue::DateTime(expected_dt))
         );
 
+        // For the object field, we need to check that it's a HashMap with the correct key-value pair
         if let Some(TypedValue::Object(map)) = typed.get("object_field") {
-            // Since we're using KeyValue as the key type, we need to create a KeyValue to look up
+            // Create a KeyValue::String to look up in the map
             let key = KeyValue::String("nested".to_string());
             assert_eq!(
                 map.get(&key),
@@ -402,413 +689,119 @@ mod type_parsing_tests {
             panic!("Expected 'object_field' to be an Object variant");
         }
     }
-}
 
-//-------------------------------------------- Arrow Utils ------------------------------------------
-
-// Parse a FieldConfig into a DataType recursively
-fn parse_field_config(field_type: &FieldType) -> DataType {
-    match field_type {
-        FieldType::Null => DataType::Null,
-        FieldType::U64 => DataType::UInt64,
-        FieldType::I64 => DataType::Int64,
-        FieldType::F64 => DataType::Float64,
-        FieldType::Bool => DataType::Boolean,
-        FieldType::String => DataType::Utf8,
-        FieldType::DateTime => DataType::Timestamp(TimeUnit::Microsecond, None),
-        FieldType::Array { item_type } => DataType::List(Arc::new(Field::new_list_field(
-            parse_field_config(&*item_type),
-            true,
-        ))),
-        FieldType::HashMap {
-            key_type,
-            value_type,
-        } => {
-            let parsed_key_type = match **key_type {
-                KeyFieldType::U64 => DataType::UInt64,
-                KeyFieldType::I64 => DataType::Int64,
-                KeyFieldType::Bool => DataType::Boolean,
-                KeyFieldType::String => DataType::Utf8,
-                KeyFieldType::DateTime => DataType::Timestamp(TimeUnit::Microsecond, None),
-            };
-            DataType::Map(
-                Arc::new(Field::new(
-                    "map",
-                    DataType::Struct(Fields::from(vec![
-                        Field::new("key", parsed_key_type, false),
-                        Field::new("value", parse_field_config(value_type), false),
-                    ])),
-                    false,
-                )),
-                true,
-            )
-        }
-    }
-}
-
-pub fn build_arrow_schema_from_config(field_configs: &[FieldConfig]) -> Arc<Schema> {
-    let fields: Vec<Field> = field_configs
-        .iter()
-        .map(|fc| Field::new(fc.field.clone(), parse_field_config(&fc.type_name), true))
-        .collect();
-    Arc::new(Schema::new(fields))
-}
-
-fn create_builder_from_data_type(data_type: &DataType) -> Box<dyn ArrayBuilder> {
-    match data_type {
-        DataType::Null => Box::new(NullBuilder::new()),
-        DataType::Int64 => Box::new(Int64Builder::new()),
-        DataType::Utf8 => Box::new(StringBuilder::new()),
-        DataType::Float64 => Box::new(Float64Builder::new()),
-        DataType::Boolean => Box::new(BooleanBuilder::new()),
-        DataType::Timestamp(TimeUnit::Microsecond, None) => {
-            Box::new(TimestampMicrosecondBuilder::new())
-        }
-        DataType::List(inner_type) => {
-            let inner_builder = create_builder_from_data_type(inner_type.data_type());
-            Box::new(ListBuilder::new(inner_builder))
-        }
-        DataType::Map(entries, _sorted) => {
-            let (key_type, value_type) = match entries.data_type() {
-                DataType::Struct(fields) => {
-                    let key_type = fields.get(0).unwrap().data_type();
-                    let value_type = fields.get(1).unwrap().data_type();
-                    (key_type, value_type)
-                }
-                _ => {
-                    log::error!("Invalid map entry type: {:?}", entries.data_type());
-                    panic!("Invalid map entry type: {:?}", entries.data_type());
-                }
-            };
-            Box::new(MapBuilder::new(
-                None,
-                create_builder_from_data_type(key_type),
-                create_builder_from_data_type(value_type),
-            ))
-        }
-        _ => {
-            log::error!("Unsupported data type: {:?}", data_type);
-            panic!("Unsupported data type: {:?}", data_type);
-        }
-    }
-}
-
-pub fn build_record_batch_from_btreemap(
-    arrow_schema: Arc<Schema>,
-    data: &BTreeMap<i64, HashMap<String, TypedValue>>,
-) -> AppResult<RecordBatch> {
-    // For each field in the schema, create a corresponding array builder.
-    let mut builders: Vec<Box<dyn ArrayBuilder>> = Vec::new();
-
-    for field in arrow_schema.fields().iter() {
-        let builder: Box<dyn ArrayBuilder> = create_builder_from_data_type(field.data_type());
-        builders.push(builder);
-    }
-
-    // Now, iterate over each "row" in the BTreeMap, and for each column,
-    // fetch the value from the row's HashMap and append it to the correct builder.
-    for (_row_key, row_map) in data.iter() {
-        for (field_name, value) in row_map.iter() {
-            let field_index = arrow_schema
-                .fields()
-                .iter()
-                .position(|f| f.name() == field_name)
-                .unwrap_or_else(|| {
-                    log::error!("Field not found: {}", field_name);
-                    panic!("Field not found: {}", field_name);
-                });
-
-            let builder = builders[field_index].as_mut();
-            match value {
-                TypedValue::Null => {
-                    if let Some(b) = builder.as_any().downcast_mut::<NullBuilder>() {
-                        b.append_null();
-                    }
-                }
-                TypedValue::U64(value) => {
-                    if let Some(b) = builder.as_any().downcast_mut::<UInt64Builder>() {
-                        b.append_value(*value);
-                    }
-                }
-                TypedValue::I64(value) => {
-                    if let Some(b) = builder.as_any().downcast_mut::<Int64Builder>() {
-                        b.append_value(*value);
-                    }
-                }
-                TypedValue::F64(value) => {
-                    if let Some(b) = builder.as_any().downcast_mut::<Float64Builder>() {
-                        b.append_value(*value);
-                    }
-                }
-                TypedValue::Bool(value) => {
-                    if let Some(b) = builder.as_any().downcast_mut::<BooleanBuilder>() {
-                        b.append_value(*value);
-                    }
-                }
-                TypedValue::String(value) => {
-                    if let Some(b) = builder.as_any().downcast_mut::<StringBuilder>() {
-                        b.append_value(value);
-                    }
-                }
-                TypedValue::DateTime(value) => {
-                    if let Some(b) = builder
-                        .as_any()
-                        .downcast_mut::<TimestampMicrosecondBuilder>()
-                    {
-                        b.append_value(value.timestamp_micros());
-                    }
-                }
-                TypedValue::Array(value) => {
-                    if let Some(b) = builder.as_any().downcast_mut::<ListBuilder<_>>() {
-                        // Start a new list
-                        b.append(true);
-
-                        // Get the inner builder
-                        let inner_builder: &mut dyn ArrayBuilder = b.values();
-
-                        // Append each element
-                        // TODO: Check if it's possible to use recursive function here
-                        for item in value {
-                            match item {
-                                TypedValue::String(s) => {
-                                    if let Some(sb) =
-                                        inner_builder.as_any().downcast_mut::<StringBuilder>()
-                                    {
-                                        sb.append_value(s);
-                                    }
-                                }
-                                TypedValue::U64(n) => {
-                                    if let Some(ub) =
-                                        inner_builder.as_any().downcast_mut::<UInt64Builder>()
-                                    {
-                                        ub.append_value(n);
-                                    }
-                                }
-                                // Add other types as needed
-                                _ => {
-                                    log::warn!("Unsupported array element type: {:?}", item);
-                                }
-                            }
-                        }
-                    }
-                }
-                TypedValue::Object(value) => {
-                    if let Some(b) = builder
-                        .as_any()
-                        .downcast_mut::<MapBuilder<StringBuilder, StringBuilder>>()
-                    {
-                        // Start a new map
-                        b.append(true);
-
-                        // TODO: Validate this part
-                        // Get the key and value builders
-                        let key_builder = b.keys();
-                        let value_builder = b.values();
-
-                        // Append each key-value pair
-                        for (key, val) in value {
-                            match key {
-                                KeyValue::String(s) => {
-                                    if let Some(sb) =
-                                        key_builder.as_any().downcast_mut::<StringBuilder>()
-                                    {
-                                        sb.append_value(s);
-                                    }
-                                }
-                                KeyValue::U64(n) => {
-                                    if let Some(ub) =
-                                        key_builder.as_any().downcast_mut::<UInt64Builder>()
-                                    {
-                                        ub.append_value(n);
-                                    }
-                                }
-                                // Add other key types as needed
-                                _ => {
-                                    log::warn!("Unsupported map key type: {:?}", key);
-                                }
-                            }
-
-                            match val {
-                                TypedValue::String(s) => {
-                                    if let Some(sb) =
-                                        value_builder.as_any().downcast_mut::<StringBuilder>()
-                                    {
-                                        sb.append_value(s);
-                                    }
-                                }
-                                TypedValue::U64(n) => {
-                                    if let Some(ub) =
-                                        value_builder.as_any().downcast_mut::<UInt64Builder>()
-                                    {
-                                        ub.append_value(n);
-                                    }
-                                }
-                                // Add other value types as needed
-                                _ => {
-                                    log::warn!("Unsupported map value type: {:?}", val);
-                                }
-                            }
-                        }
-                    }
-                }
-                _ => {
-                    log::error!("Unsupported value type: {:?}", value);
-                    return Err(PipelineError::ParseError(format!(
-                        "Unsupported value type: {:?}",
-                        value
-                    ))
-                    .into());
-                }
-            }
-        }
-    }
-
-    // Once all rows have been appended, build the final Arrow arrays
-    let mut arrays: Vec<ArrayRef> = Vec::with_capacity(builders.len());
-    for builder in builders {
-        arrays.push(builder.finish().into());
-    }
-
-    // Create a RecordBatch from the arrays
-    let record_batch = RecordBatch::try_new(arrow_schema, arrays).map_err(|e| {
-        log::error!("Error creating RecordBatch: {:?}", e);
-        PipelineError::ParseError(format!("Error creating RecordBatch: {:?}", e)).into()
-    })?;
-
-    Ok(record_batch)
-}
-
-//-------------------------------------------- Arrow Utils Tests ------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
+    //-------------------------------------------- Arrow Parsing Tests ------------------------------------------
 
     #[test]
     fn test_build_arrow_schema_from_config() {
         let field_configs = vec![
             FieldConfig {
-                field: "int_field".to_string(),
+                field: "id".to_string(),
                 type_name: FieldType::U64,
             },
             FieldConfig {
-                field: "float_field".to_string(),
-                type_name: FieldType::F64,
-            },
-            FieldConfig {
-                field: "string_field".to_string(),
+                field: "name".to_string(),
                 type_name: FieldType::String,
-            },
-            FieldConfig {
-                field: "bool_field".to_string(),
-                type_name: FieldType::Bool,
-            },
-            FieldConfig {
-                field: "datetime_field".to_string(),
-                type_name: FieldType::DateTime,
             },
         ];
 
-        let schema = build_arrow_schema_from_config(&field_configs).unwrap();
-
-        assert_eq!(schema.fields().len(), 5);
-        assert_eq!(schema.field(0).name(), "int_field");
+        let schema = build_arrow_schema_from_config(&field_configs);
+        assert_eq!(schema.fields().len(), 2);
+        assert_eq!(schema.field(0).name(), "id");
         assert_eq!(schema.field(0).data_type(), &DataType::UInt64);
-        assert_eq!(schema.field(1).name(), "float_field");
-        assert_eq!(schema.field(1).data_type(), &DataType::Float64);
-        assert_eq!(schema.field(2).name(), "string_field");
-        assert_eq!(schema.field(2).data_type(), &DataType::Utf8);
-        assert_eq!(schema.field(3).name(), "bool_field");
-        assert_eq!(schema.field(3).data_type(), &DataType::Boolean);
-        assert_eq!(schema.field(4).name(), "datetime_field");
-        assert_eq!(
-            schema.field(4).data_type(),
-            &DataType::Timestamp(TimeUnit::Microsecond, None)
-        );
+        assert_eq!(schema.field(1).name(), "name");
+        assert_eq!(schema.field(1).data_type(), &DataType::Utf8);
     }
 
     #[test]
-    fn test_convert_records_to_arrow() {
+    fn test_build_record_batch_from_btreemap() {
         let field_configs = vec![
             FieldConfig {
-                field: "int_field".to_string(),
+                field: "id".to_string(),
                 type_name: FieldType::U64,
             },
             FieldConfig {
-                field: "string_field".to_string(),
+                field: "name".to_string(),
                 type_name: FieldType::String,
             },
         ];
 
-        let schema = build_arrow_schema_from_config(&field_configs).unwrap();
+        let schema = build_arrow_schema_from_config(&field_configs);
+        let mut data = BTreeMap::new();
 
-        let mut records = Vec::new();
         let mut record1 = HashMap::new();
-        record1.insert("int_field".to_string(), TypedValue::U64(42));
-        record1.insert(
-            "string_field".to_string(),
-            TypedValue::String("hello".to_string()),
-        );
-        records.push(record1);
+        record1.insert("id".to_string(), TypedValue::U64(1));
+        record1.insert("name".to_string(), TypedValue::String("test1".to_string()));
+        data.insert(1, record1);
 
         let mut record2 = HashMap::new();
-        record2.insert("int_field".to_string(), TypedValue::U64(123));
-        record2.insert(
-            "string_field".to_string(),
-            TypedValue::String("world".to_string()),
-        );
-        records.push(record2);
+        record2.insert("id".to_string(), TypedValue::U64(2));
+        record2.insert("name".to_string(), TypedValue::String("test2".to_string()));
+        data.insert(2, record2);
 
-        let batch = convert_records_to_arrow(&records, &schema).unwrap();
-
-        assert_eq!(batch.num_columns(), 2);
+        let batch = build_record_batch_from_btreemap(schema, &data).unwrap();
         assert_eq!(batch.num_rows(), 2);
 
-        // Check int column
-        let int_array = batch
+        let id_array = batch
             .column(0)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
-        assert_eq!(int_array.value(0), 42);
-        assert_eq!(int_array.value(1), 123);
-
-        // Check string column
-        let string_array = batch
+        let name_array = batch
             .column(1)
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
-        assert_eq!(string_array.value(0), "hello");
-        assert_eq!(string_array.value(1), "world");
+
+        assert_eq!(id_array.value(0), 1);
+        assert_eq!(id_array.value(1), 2);
+        assert_eq!(name_array.value(0), "test1");
+        assert_eq!(name_array.value(1), "test2");
     }
 
     #[test]
-    fn test_convert_records_with_nulls() {
-        let field_configs = vec![FieldConfig {
-            field: "nullable_int".to_string(),
-            type_name: FieldType::U64,
-        }];
+    fn test_build_record_batch_with_nulls() {
+        let field_configs = vec![
+            FieldConfig {
+                field: "id".to_string(),
+                type_name: FieldType::U64,
+            },
+            FieldConfig {
+                field: "name".to_string(),
+                type_name: FieldType::String,
+            },
+        ];
 
-        let schema = build_arrow_schema_from_config(&field_configs).unwrap();
+        let schema = build_arrow_schema_from_config(&field_configs);
+        let mut data = BTreeMap::new();
 
-        let mut records = Vec::new();
         let mut record1 = HashMap::new();
-        record1.insert("nullable_int".to_string(), TypedValue::Null);
-        records.push(record1);
+        record1.insert("id".to_string(), TypedValue::U64(1));
+        record1.insert("name".to_string(), TypedValue::Null);
+        data.insert(1, record1);
 
         let mut record2 = HashMap::new();
-        record2.insert("nullable_int".to_string(), TypedValue::U64(42));
-        records.push(record2);
+        record2.insert("id".to_string(), TypedValue::Null);
+        record2.insert("name".to_string(), TypedValue::String("test2".to_string()));
+        data.insert(2, record2);
 
-        let batch = convert_records_to_arrow(&records, &schema).unwrap();
+        let batch = build_record_batch_from_btreemap(schema, &data).unwrap();
+        assert_eq!(batch.num_rows(), 2);
 
-        let int_array = batch
+        let id_array = batch
             .column(0)
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
-        assert!(int_array.is_null(0));
-        assert_eq!(int_array.value(1), 42);
+        let name_array = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+
+        assert_eq!(id_array.value(0), 1);
+        assert!(id_array.is_null(1));
+        assert!(name_array.is_null(0));
+        assert_eq!(name_array.value(1), "test2");
     }
 }

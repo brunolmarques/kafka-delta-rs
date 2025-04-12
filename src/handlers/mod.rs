@@ -78,8 +78,6 @@ pub enum AppError {
     #[error("Telemetry error: {0}")]
     Monitoring(#[from] MonitoringError),
 
-    #[error("Other error: {0}")]
-    Other(String),
 }
 
 /// A specialized result type for our application
@@ -126,10 +124,6 @@ mod tests {
 
     #[test]
     fn test_app_error_display() {
-        // Test the AppError::Other variant.
-        let err = AppError::Other("unknown error".into());
-        assert_eq!(err.to_string(), "Other error: unknown error");
-
         // Test wrapping a KafkaError.
         let kafka_err = AppError::Kafka(KafkaError::ReadError("read failed".into()));
         assert_eq!(

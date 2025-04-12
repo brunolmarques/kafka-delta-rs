@@ -233,7 +233,7 @@ mod tests {
     fn create_pipeline() -> Pipeline<'static> {
         let config = Box::leak(Box::new(DeltaConfig {
             table_path: "dummy".to_string(),
-            mode: DeltaWriteMode::Insert,
+            mode: DeltaWriteMode::INSERT,
             partition: "default".to_string(),
             schema: None,
         }));
