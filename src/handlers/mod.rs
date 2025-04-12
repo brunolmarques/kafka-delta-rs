@@ -2,7 +2,7 @@
 use thiserror::Error;
 
 /// Errors related to configuration (YAML parsing, invalid fields, etc.)
-#[derive(Error, Debug)]
+#[derive(Error, Debug, PartialEq)]
 pub enum ConfigError {
     #[error("Failed to read or parse configuration file: {0}")]
     ReadError(String),
@@ -12,7 +12,7 @@ pub enum ConfigError {
 }
 
 /// Errors related to Kafka operations
-#[derive(Error, Debug)]
+#[derive(Error, Debug, PartialEq)]
 pub enum KafkaError {
     #[error("Error connecting to Kafka broker: {0}")]
     BrokerConnection(String),
@@ -28,7 +28,7 @@ pub enum KafkaError {
 }
 
 /// Errors related to the data pipeline/aggregator
-#[derive(Error, Debug)]
+#[derive(Error, Debug, PartialEq)]
 pub enum PipelineError {
     #[error("Failed to insert record into aggregator: {0}")]
     InsertError(String),
@@ -41,7 +41,7 @@ pub enum PipelineError {
 }
 
 /// Errors related to writing or reading data from Delta
-#[derive(Error, Debug)]
+#[derive(Error, Debug, PartialEq)]
 pub enum DeltaError {
     #[error("Delta I/O error: {0}")]
     IoError(String),
@@ -51,7 +51,7 @@ pub enum DeltaError {
 }
 
 /// Errors related to monitoring and telemetry
-#[derive(Error, Debug)]
+#[derive(Error, Debug, PartialEq)]
 pub enum MonitoringError {
     #[error("Telemetry endpoint error: {0}")]
     ExporterError(String),
@@ -61,7 +61,7 @@ pub enum MonitoringError {
 }
 
 /// A top-level application error enum combining sub-errors
-#[derive(Error, Debug)]
+#[derive(Error, Debug, PartialEq)]
 pub enum AppError {
     #[error("Config error: {0}")]
     Config(#[from] ConfigError),

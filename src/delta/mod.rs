@@ -25,12 +25,12 @@ pub enum DeltaWriteMode {
 pub struct DeltaRsWriter {
     pub table_path: String,
     pub partition: String,
-    pub prune_filter: Vec<String>,
+    pub prune_filter: HashMap<String, String>,
     pub write_mode: DeltaWriteMode, 
 }
 
 impl DeltaRsWriter {
-    pub fn new(delta_config: &DeltaConfig, prune_filter: Vec<String>) -> Self {
+    pub fn new(delta_config: &DeltaConfig, prune_filter: HashMap<String, String>) -> Self {
         DeltaRsWriter {
             table_path: delta_config.table_path.clone(),
             partition: delta_config.partition.clone(),
@@ -67,7 +67,8 @@ impl DeltaWriter for DeltaRsWriter {
             })?;
         
 
-
+        // TODO: Implement data convertion to arrow
+        // TODO: Implement atomic write operation
 
         Ok(())
     }
