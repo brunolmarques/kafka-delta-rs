@@ -87,7 +87,7 @@ impl AppConfig {
             ))
         })?;
 
-        let config: AppConfig = serde_yaml::from_str(&content).map_err(|e| {
+        let mut config: AppConfig = serde_yaml::from_str(&content).map_err(|e| {
             log::error!("YAML parse error in {:?}: {}", path.as_ref(), e);
             ConfigError::ReadError(format!("YAML parse error in {:?}: {}", path.as_ref(), e))
         })?;
@@ -156,6 +156,15 @@ impl AppConfig {
             }
         }
 
+        // Validate the table path and store the parsed path
+        let parsed_path = deltalake::Path::parse(&config.delta.table_path).map_err(|e| {
+            log::error!("Invalid Delta table path: {}", e);
+            ConfigError::InvalidField(format!("Invalid Delta table path: {}", e))
+        })?;
+
+        // Store the validated path back in the config
+        config.delta.table_path = parsed_path.to_string();
+
         log::info!("Configuration file loaded successfully");
         Ok(config)
     }
@@ -166,7 +175,7 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::random;
+    use crate::model::FieldType;
     use std::fs;
     use std::path::PathBuf;
 
@@ -181,7 +190,7 @@ kafka:
 delta:
   table_path: "/data/delta/table"
   partition: "day-time"
-  mode: "INSERT"
+  mode: INSERT
   schema:
     - field: "id"
       type: "u64"

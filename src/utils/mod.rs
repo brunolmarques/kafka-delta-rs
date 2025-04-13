@@ -207,53 +207,6 @@ pub fn parse_to_typed(
 
 //-------------------------------------------- Arrow Utils ------------------------------------------
 
-fn parse_field_config(field_type: &FieldType) -> DataType {
-    match field_type {
-        FieldType::Null => DataType::Null,
-        FieldType::U64 => DataType::UInt64,
-        FieldType::I64 => DataType::Int64,
-        FieldType::F64 => DataType::Float64,
-        FieldType::Bool => DataType::Boolean,
-        FieldType::String => DataType::Utf8,
-        FieldType::DateTime => DataType::Timestamp(TimeUnit::Microsecond, None),
-        FieldType::Array { item_type } => DataType::List(Arc::new(Field::new_list_field(
-            parse_field_config(&*item_type),
-            true,
-        ))),
-        FieldType::HashMap {
-            key_type,
-            value_type,
-        } => {
-            let parsed_key_type = match **key_type {
-                KeyFieldType::U64 => DataType::UInt64,
-                KeyFieldType::I64 => DataType::Int64,
-                KeyFieldType::Bool => DataType::Boolean,
-                KeyFieldType::String => DataType::Utf8,
-                KeyFieldType::DateTime => DataType::Timestamp(TimeUnit::Microsecond, None),
-            };
-            DataType::Map(
-                Arc::new(Field::new(
-                    "map",
-                    DataType::Struct(Fields::from(vec![
-                        Field::new("key", parsed_key_type, false),
-                        Field::new("value", parse_field_config(value_type), false),
-                    ])),
-                    false,
-                )),
-                true,
-            )
-        }
-    }
-}
-
-pub fn build_arrow_schema_from_config(field_configs: &[FieldConfig]) -> Arc<Schema> {
-    let fields: Vec<Field> = field_configs
-        .iter()
-        .map(|fc| Field::new(fc.field.clone(), parse_field_config(&fc.type_name), true))
-        .collect();
-    Arc::new(Schema::new(fields))
-}
-
 fn create_builder_from_data_type(data_type: &DataType) -> Box<dyn ArrayBuilder> {
     match data_type {
         DataType::Null => Box::new(NullBuilder::new()),
@@ -550,43 +503,18 @@ mod tests {
         }
     }
 
-    // ===== Arrow Schema Tests =====
-    #[test]
-    fn test_build_arrow_schema_from_config() {
-        let field_configs = vec![
-            FieldConfig {
-                field: "id".to_string(),
-                type_name: FieldType::U64,
-            },
-            FieldConfig {
-                field: "name".to_string(),
-                type_name: FieldType::String,
-            },
+    // ===== Record Batch Tests =====
+    fn create_mock_schema() -> Arc<Schema> {
+        let fields = vec![
+            Field::new("id", DataType::UInt64, true),
+            Field::new("name", DataType::Utf8, true),
         ];
-
-        let schema = build_arrow_schema_from_config(&field_configs);
-        assert_eq!(schema.fields().len(), 2);
-        assert_eq!(schema.field(0).name(), "id");
-        assert_eq!(schema.field(0).data_type(), &DataType::UInt64);
-        assert_eq!(schema.field(1).name(), "name");
-        assert_eq!(schema.field(1).data_type(), &DataType::Utf8);
+        Arc::new(Schema::new(Fields::from(fields)))
     }
 
-    // ===== Record Batch Tests =====
     #[test]
     fn test_build_record_batch_from_vec() {
-        let field_configs = vec![
-            FieldConfig {
-                field: "id".to_string(),
-                type_name: FieldType::U64,
-            },
-            FieldConfig {
-                field: "name".to_string(),
-                type_name: FieldType::String,
-            },
-        ];
-
-        let schema = build_arrow_schema_from_config(&field_configs);
+        let schema = create_mock_schema();
         let data = vec![
             HashMap::from([
                 ("id".to_string(), TypedValue::U64(1)),
@@ -620,18 +548,7 @@ mod tests {
 
     #[test]
     fn test_build_record_batch_with_nulls() {
-        let field_configs = vec![
-            FieldConfig {
-                field: "id".to_string(),
-                type_name: FieldType::U64,
-            },
-            FieldConfig {
-                field: "name".to_string(),
-                type_name: FieldType::String,
-            },
-        ];
-
-        let schema = build_arrow_schema_from_config(&field_configs);
+        let schema = create_mock_schema();
         let data = vec![
             HashMap::from([
                 ("id".to_string(), TypedValue::U64(1)),

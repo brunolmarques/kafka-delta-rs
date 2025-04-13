@@ -2,6 +2,13 @@
 // deduplicates them in parallel, and prepares atomic daily batches.
 // It also implements recovery if a crash occurs (e.g., by reading checkpoints).
 use async_trait::async_trait;
+use deltalake::kernel::{Schema, StructType};
+use deltalake::parquet::{
+    basic::{Compression, ZstdLevel},
+    file::properties::WriterProperties,
+};
+use deltalake::writer::{DeltaWriter, RecordBatchWriter};
+use deltalake::*;
 use std::collections::HashMap;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -12,7 +19,7 @@ use crate::handlers::PipelineError::FlushError;
 use crate::handlers::{AppError, AppResult, DeltaError, PipelineError};
 use crate::model::{MessageRecordTyped, TypedValue};
 use crate::monitoring::Monitoring;
-use crate::utils::{build_arrow_schema_from_config, build_record_batch_from_vec, parse_to_typed};
+use crate::utils::{build_record_batch_from_vec, parse_to_typed};
 
 /// Buffer used for consolidating messages
 /// Example of the aggregator:
@@ -89,18 +96,80 @@ impl InMemoryAggregator {
 
 /// Wraps aggregator & flush logic
 pub struct Pipeline<'a> {
+    delta_table: DeltaTable,
+    delta_writer: Arc<Mutex<RecordBatchWriter>>,
+    delta_schema: Arc<arrow::datatypes::Schema>,
     aggregator: Arc<Mutex<InMemoryAggregator>>,
     delta_config: &'a DeltaConfig,
     monitoring: Option<&'a Monitoring>, // TODO: Implement monitoring
 }
 
 impl<'a> Pipeline<'a> {
-    pub fn new(delta_config: &'a DeltaConfig, monitoring: Option<&'a Monitoring>) -> Self {
-        Self {
+    pub async fn new(
+        delta_config: &'a DeltaConfig,
+        monitoring: Option<&'a Monitoring>,
+    ) -> AppResult<Self> {
+        let delta_table = match deltalake::open_table(&delta_config.table_path).await {
+            Ok(table) => table,
+            Err(e) => {
+                log::error!("Failed to open Delta table: {}", e);
+                return Err(AppError::Delta(DeltaError::IoError(format!(
+                    "Failed to open Delta table: {}",
+                    e
+                ))));
+            }
+        };
+
+        let writer_properties = WriterProperties::builder()
+            .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
+            .build();
+
+        let writer = RecordBatchWriter::for_table(&delta_table).map_err(|e| {
+            log::error!("Failed to make RecordBatchWriter: {}", e);
+            AppError::Delta(DeltaError::TableError(format!(
+                "Failed to make RecordBatchWriter: {}",
+                e
+            )))
+        })?;
+
+        let delta_writer = writer.with_writer_properties(writer_properties);
+
+        let metadata = delta_table.metadata().map_err(|e| {
+            log::error!("Failed to get metadata for the table: {}", e);
+            AppError::Delta(DeltaError::TableError(format!(
+                "Failed to get metadata for the table: {}",
+                e
+            )))
+        })?;
+
+        let schema = metadata.schema().map_err(|e| {
+            log::error!("Failed to get schema: {}", e);
+            AppError::Delta(DeltaError::TableError(format!(
+                "Failed to get schema: {}",
+                e
+            )))
+        })?;
+
+        let arrow_schema =
+            <deltalake::arrow::datatypes::Schema as TryFrom<&StructType>>::try_from(&schema)
+                .map_err(|e| {
+                    log::error!("Failed to convert to arrow schema: {}", e);
+                    AppError::Delta(DeltaError::TableError(format!(
+                        "Failed to convert to arrow schema: {}",
+                        e
+                    )))
+                })?;
+
+        let arrow_schema_ref = Arc::new(arrow_schema);
+
+        Ok(Self {
+            delta_table,
+            delta_writer: Arc::new(Mutex::new(delta_writer)),
+            delta_schema: arrow_schema_ref,
             aggregator: Arc::new(Mutex::new(InMemoryAggregator::new())),
             delta_config,
             monitoring,
-        }
+        })
     }
 }
 
@@ -208,20 +277,8 @@ impl<'a> PipelineTrait for Pipeline<'a> {
             self.delta_config.table_path.clone()
         );
 
-        // Generate arrow schema from config
-        let schema =
-            build_arrow_schema_from_config(self.delta_config.schema.as_deref().unwrap_or(&[]));
-
-        // If there's no schema defined, we can't create a record batch
-        if schema.fields().is_empty() {
-            log::error!("No schema defined. Fail to generate arrow schema.");
-            return Err(AppError::Pipeline(PipelineError::FlushError(
-                "No schema defined. Fail to generate arrow schema.".to_string(),
-            )));
-        }
-
-        // Convert batch to arrow table
-        let arrow_table = build_record_batch_from_vec(schema, &batch)?;
+        // Convert batch to arrow RecordBatch
+        let arrow_table = build_record_batch_from_vec(self.delta_schema.clone(), &batch)?;
 
         // TODO: Implement Delta table writing logic here
 
@@ -246,19 +303,19 @@ mod tests {
     use tokio;
 
     // Updated helper for creating a pipeline instance for tests.
-    fn create_pipeline() -> Pipeline<'static> {
+    async fn create_pipeline() -> Pipeline<'static> {
         let config = Box::leak(Box::new(DeltaConfig {
             table_path: "dummy".to_string(),
             mode: DeltaWriteMode::INSERT,
             partition: "default".to_string(),
             schema: None,
         }));
-        Pipeline::new(config, None)
+        Pipeline::new(config, None).await.unwrap()
     }
 
     #[tokio::test]
     async fn test_insert_record_unique() {
-        let pipeline = create_pipeline();
+        let pipeline = create_pipeline().await;
         let payload = r#"{"dummy": "payload1"}"#.to_string(); // changed to valid JSON
         let res = pipeline
             .insert_record(1, Some("a".to_string()), payload)
@@ -269,7 +326,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_insert_record_duplicate_offset() {
-        let pipeline = create_pipeline();
+        let pipeline = create_pipeline().await;
         let payload1 = r#"{"dummy": "payload1"}"#.to_string();
         let payload2 = r#"{"dummy": "payload2"}"#.to_string();
         assert!(
@@ -286,7 +343,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_insert_record_duplicate_key() {
-        let pipeline = create_pipeline();
+        let pipeline = create_pipeline().await;
         let payload1 = r#"{"dummy": "payload1"}"#.to_string();
         let payload2 = r#"{"dummy": "payload2"}"#.to_string();
         assert!(
@@ -304,7 +361,7 @@ mod tests {
     // Renamed test to fix typo.
     #[tokio::test]
     async fn test_flush_empty_the_aggregator() {
-        let pipeline = create_pipeline();
+        let pipeline = create_pipeline().await;
         let payload1 = r#"{"dummy": "payload1"}"#.to_string();
         let payload2 = r#"{"dummy": "payload2"}"#.to_string();
         pipeline

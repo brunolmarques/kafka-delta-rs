@@ -13,6 +13,7 @@ mod monitoring;
 mod pipeline;
 mod utils;
 
+use handlers::DeltaError;
 use std::env;
 use std::sync::Arc;
 use tokio::main;
@@ -44,7 +45,7 @@ async fn run() -> Result<(), AppError> {
     let monitoring = Monitoring::init(&app_config.monitoring)?;
 
     // 3) Initialize the pipeline
-    let pipeline = Arc::new(Pipeline::new(&app_config.delta, Some(&monitoring)));
+    let pipeline = Arc::new(Pipeline::new(&app_config.delta, Some(&monitoring)).await?);
 
     // 4) Initialize Kafka consumer
     let consumer = KafkaConsumer::new(&app_config, pipeline, Some(&monitoring))?;

@@ -1,4 +1,5 @@
 use arrow::array::RecordBatch;
+use deltalake::writer::WriteMode;
 // This module writes consolidated data to an existing Delta table using the deltalake crate.
 // It supports atomic operations and idempotent writes, handling schema changes gracefully.
 use deltalake::DeltaOps;
@@ -7,7 +8,6 @@ use std::collections::HashMap;
 
 use crate::config::DeltaConfig;
 use crate::handlers::{AppError, DeltaError};
-use crate::model::TypedValue;
 
 // Trait for Delta table writing.
 pub trait DeltaWriter {
@@ -66,6 +66,30 @@ impl DeltaWriter for DeltaRsWriter {
         })?;
 
         // TODO: Implement atomic write operation
+        match self.write_mode {
+            DeltaWriteMode::INSERT => {
+                // Write the data to the Delta table using partition column
+                // to reduce the number of files in the table, and use the
+                // prune filter to prune the data.
+                // delta_ops
+                //     .write(data)
+                //     .mode(WriteMode::Append)
+                //     .await
+                //     .map_err(|e| {
+                //         log::error!("Failed to write data to Delta table: {}", e);
+                //         DeltaError::TableError(format!(
+                //             "Failed to write data to Delta table: {}",
+                //             e
+                //         ))
+                //     })?;
+            }
+            DeltaWriteMode::UPSERT => {
+                // Write the data to the Delta table using partition column
+                // to reduce the number of files in the table, and use the
+                // prune filter to prune the data.
+                // TODO: Implement upsert operation
+            }
+        }
 
         Ok(())
     }
