@@ -1,17 +1,18 @@
+use arrow::array::RecordBatch;
 // This module writes consolidated data to an existing Delta table using the deltalake crate.
 // It supports atomic operations and idempotent writes, handling schema changes gracefully.
+use deltalake::DeltaOps;
 use serde::Deserialize;
 use std::collections::HashMap;
-use deltalake::DeltaOps;
 
+use crate::config::DeltaConfig;
 use crate::handlers::{AppError, DeltaError};
 use crate::model::TypedValue;
-use crate::config::DeltaConfig;
 
 // Trait for Delta table writing.
 pub trait DeltaWriter {
     // Inserts a batch of records into the delta table atomically.
-    async fn write(&self, data: &[HashMap<String, TypedValue>]) -> Result<(), AppError>;
+    async fn write(&self, data: &RecordBatch) -> Result<(), AppError>;
 }
 
 #[derive(Deserialize, Debug, Clone, Copy)]
@@ -19,7 +20,6 @@ pub trait DeltaWriter {
 pub enum DeltaWriteMode {
     INSERT,
     UPSERT,
-    
 }
 
 // Example implementation using deltalake.
@@ -27,7 +27,7 @@ pub struct DeltaRsWriter {
     pub table_path: String,
     pub partition: String,
     pub prune_filter: HashMap<String, String>,
-    pub write_mode: DeltaWriteMode, 
+    pub write_mode: DeltaWriteMode,
 }
 
 impl DeltaRsWriter {
@@ -42,11 +42,11 @@ impl DeltaRsWriter {
 }
 
 impl DeltaWriter for DeltaRsWriter {
-    async fn write(&self, data: &[HashMap<String, TypedValue>]) -> Result<(), AppError> {
+    async fn write(&self, data: &RecordBatch) -> Result<(), AppError> {
         // Pseudocode: Open the delta table, perform an atomic INSERT or MERGE into the partition specified.
         // If a new column is detected, skip it instead of panicking.
         // If there's no data, we can skip
-        if data.is_empty() {
+        if data.num_rows() == 0 {
             log::warn!("No data to write; skipping.");
             return Ok(());
         }
@@ -58,17 +58,13 @@ impl DeltaWriter for DeltaRsWriter {
                 log::error!("Failed to create DeltaOps instance: {}", e);
                 DeltaError::IoError(format!("Failed to create DeltaOps instance: {}", e))
             })?;
-        
-        // Load the Delta table.
-        let table = delta_ops.load()
-            .await
-            .map_err(|e| {
-                log::error!("Failed to load Delta table: {}", e);
-                DeltaError::IoError(format!("Failed to load Delta table: {}", e))
-            })?;
-        
 
-        // TODO: Implement data convertion to arrow
+        // Load the Delta table.
+        let table = delta_ops.load().await.map_err(|e| {
+            log::error!("Failed to load Delta table: {}", e);
+            DeltaError::IoError(format!("Failed to load Delta table: {}", e))
+        })?;
+
         // TODO: Implement atomic write operation
 
         Ok(())
@@ -76,5 +72,3 @@ impl DeltaWriter for DeltaRsWriter {
 }
 
 //---------------------------------------- Tests ----------------------------------------
-
-

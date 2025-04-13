@@ -6,7 +6,7 @@ use arrow::datatypes::{DataType, Field, Fields, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::handlers::{AppResult, PipelineError};
@@ -426,9 +426,9 @@ fn append_value_to_builder(builder: &mut dyn ArrayBuilder, value: &TypedValue) {
     }
 }
 
-pub fn build_record_batch_from_btreemap(
+pub fn build_record_batch_from_vec(
     arrow_schema: Arc<Schema>,
-    data: &BTreeMap<i64, HashMap<String, TypedValue>>,
+    data: &[HashMap<String, TypedValue>],
 ) -> AppResult<RecordBatch> {
     // For each field in the schema, create a corresponding array builder.
     let mut builders: Vec<Box<dyn ArrayBuilder>> = Vec::new();
@@ -438,8 +438,8 @@ pub fn build_record_batch_from_btreemap(
         builders.push(builder);
     }
 
-    // Iterate over each "row" in the BTreeMap.
-    for (_row_key, row_map) in data.iter() {
+    // Iterate over each "row" in the Vec.
+    for row_map in data.iter() {
         // For each field in the schema (by index)
         for (field_index, field) in arrow_schema.fields().iter().enumerate() {
             let builder = builders[field_index].as_mut();
@@ -574,7 +574,7 @@ mod tests {
 
     // ===== Record Batch Tests =====
     #[test]
-    fn test_build_record_batch_from_btreemap() {
+    fn test_build_record_batch_from_vec() {
         let field_configs = vec![
             FieldConfig {
                 field: "id".to_string(),
@@ -587,19 +587,18 @@ mod tests {
         ];
 
         let schema = build_arrow_schema_from_config(&field_configs);
-        let mut data = BTreeMap::new();
+        let data = vec![
+            HashMap::from([
+                ("id".to_string(), TypedValue::U64(1)),
+                ("name".to_string(), TypedValue::String("test1".to_string())),
+            ]),
+            HashMap::from([
+                ("id".to_string(), TypedValue::U64(2)),
+                ("name".to_string(), TypedValue::String("test2".to_string())),
+            ]),
+        ];
 
-        let mut record1 = HashMap::new();
-        record1.insert("id".to_string(), TypedValue::U64(1));
-        record1.insert("name".to_string(), TypedValue::String("test1".to_string()));
-        data.insert(1, record1);
-
-        let mut record2 = HashMap::new();
-        record2.insert("id".to_string(), TypedValue::U64(2));
-        record2.insert("name".to_string(), TypedValue::String("test2".to_string()));
-        data.insert(2, record2);
-
-        let batch = build_record_batch_from_btreemap(schema, &data).unwrap();
+        let batch = build_record_batch_from_vec(schema, &data).unwrap();
         assert_eq!(batch.num_rows(), 2);
 
         let id_array = batch
@@ -633,19 +632,18 @@ mod tests {
         ];
 
         let schema = build_arrow_schema_from_config(&field_configs);
-        let mut data = BTreeMap::new();
+        let data = vec![
+            HashMap::from([
+                ("id".to_string(), TypedValue::U64(1)),
+                ("name".to_string(), TypedValue::Null),
+            ]),
+            HashMap::from([
+                ("id".to_string(), TypedValue::Null),
+                ("name".to_string(), TypedValue::String("test2".to_string())),
+            ]),
+        ];
 
-        let mut record1 = HashMap::new();
-        record1.insert("id".to_string(), TypedValue::U64(1));
-        record1.insert("name".to_string(), TypedValue::Null);
-        data.insert(1, record1);
-
-        let mut record2 = HashMap::new();
-        record2.insert("id".to_string(), TypedValue::Null);
-        record2.insert("name".to_string(), TypedValue::String("test2".to_string()));
-        data.insert(2, record2);
-
-        let batch = build_record_batch_from_btreemap(schema, &data).unwrap();
+        let batch = build_record_batch_from_vec(schema, &data).unwrap();
         assert_eq!(batch.num_rows(), 2);
 
         let id_array = batch

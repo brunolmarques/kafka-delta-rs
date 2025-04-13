@@ -9,10 +9,10 @@ use tokio::task;
 
 use crate::config::DeltaConfig;
 use crate::handlers::PipelineError::FlushError;
-use crate::handlers::{AppResult, DeltaError, PipelineError};
+use crate::handlers::{AppError, AppResult, DeltaError, PipelineError};
 use crate::model::{MessageRecordTyped, TypedValue};
 use crate::monitoring::Monitoring;
-use crate::utils::parse_to_typed;
+use crate::utils::{build_arrow_schema_from_config, build_record_batch_from_vec, parse_to_typed};
 
 /// Buffer used for consolidating messages
 /// Example of the aggregator:
@@ -207,6 +207,21 @@ impl<'a> PipelineTrait for Pipeline<'a> {
             batch.len(),
             self.delta_config.table_path.clone()
         );
+
+        // Generate arrow schema from config
+        let schema =
+            build_arrow_schema_from_config(self.delta_config.schema.as_deref().unwrap_or(&[]));
+
+        // If there's no schema defined, we can't create a record batch
+        if schema.fields().is_empty() {
+            log::error!("No schema defined. Fail to generate arrow schema.");
+            return Err(AppError::Pipeline(PipelineError::FlushError(
+                "No schema defined. Fail to generate arrow schema.".to_string(),
+            )));
+        }
+
+        // Convert batch to arrow table
+        let arrow_table = build_record_batch_from_vec(schema, &batch)?;
 
         // TODO: Implement Delta table writing logic here
 

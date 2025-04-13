@@ -8,9 +8,9 @@ mod delta;
 mod handlers;
 mod kafka;
 mod logging;
+mod model;
 mod monitoring;
 mod pipeline;
-mod model;
 mod utils;
 
 use std::env;
