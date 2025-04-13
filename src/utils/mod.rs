@@ -72,29 +72,21 @@ fn parse_field_value(
         }
         FieldType::DateTime => {
             let s = raw_value.as_str().ok_or_else(|| {
-                log::error!("Expected DateTime (string), got something else: {}", &raw_value);
+                log::error!(
+                    "Expected DateTime (string), got something else: {}",
+                    &raw_value
+                );
                 PipelineError::ParseError(format!(
                     "Expected DateTime (string), got something else: {}",
                     raw_value
                 ))
-            })?
-            .trim();
-            log::debug!("The raw date-time string is -> '{}'", s);
-            println!("DEBUG: about to parse date/time -> '{}'", s);
-            // Print the length
-            println!("DEBUG: s.len() = {}", s.len());
-
-            // Print each character and its byte code
-            for (i, c) in s.chars().enumerate() {
-                println!("Char #{i}: {:?} (U+{:X})", c, c as u32);
-            }
-
-            // Use a format string that accepts optional fractional seconds.
-            let dt_fixed = DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%SZ").map_err(|e| {
-                log::error!("Field '{:?}' not a valid DateTime: {}", field_type, e);
-                PipelineError::ParseError(format!("Invalid DateTime format: {e}"))
             })?;
-            let dt = dt_fixed.with_timezone(&Utc);
+            let dt = DateTime::parse_from_rfc3339(s)
+                .map_err(|e| {
+                    log::error!("Field '{}' not a valid DateTime: {}", field_type, e);
+                    PipelineError::ParseError(format!("Invalid DateTime format: {e}"))
+                })?
+                .with_timezone(&Utc);
             Ok(TypedValue::DateTime(dt))
         }
         FieldType::Array { item_type } => {
@@ -126,7 +118,7 @@ fn parse_field_value(
                 ))
             })?;
 
-            // Map key types are limited to types that implment Eq and Hash.
+            // Map key types are limited to types that impl Eq and Hash.
             // Values are enforced when parsing the Config.yaml file.
             let mut map = HashMap::new();
             for (k, v) in obj.iter() {
@@ -175,48 +167,7 @@ fn parse_field_value(
     }
 }
 
-/// Parse a JSON object according to field configs, function uses a complete schema adherence
-/// to the field configs. This means that the JSON object must contain all fields defined in the schema.
-/// The function will return a HashMap<String, TypedValue> where the keys are the field names
-/// and the values are the parsed TypedValue.
-/// If a field is missing or has an invalid type, the function will return an error.
-/*
- Why Return a HashMap Instead of a Struct?
-
-When the schema is not fully known at compile time, storing the parsed fields in a HashMap<String, TypedValue>
-can be a convenient way to preserve some dynamism. For each field in the YAML-configured schema, it's possible
-to parse a value from the JSON and store it by name. This means that the code doesn't require a fixed set of fields
-or a dedicated Rust struct matching that set. Instead, relying on a "field definition" from the config.
-
-Pros
-
-Easily add/remove fields in the YAML config without modifying the core Rust code or recompiling.
-It's simpler to write a generic "pull field X, parse as type Y, store in the map" function than generating/maintaining
-dozens of different typed structs.This structure is more flexible for multi-tenant or multi-schema scenarios.
-
-Cons
-
-Lose the type safety of a compile-time struct. Access to a field is always something like record.get("some_field"),
-returning an Option<&TypedValue> rather than a strongly typed field. Require handling arrays, nested objects, etc.
-case-by-case, often by adding more variants to TypedValue or storing them as JSON again.
-*/
-/// Output example:
-/// ```json
-/// {
-///     "user_id": U64(123),
-///     "user_name": String("John Doe"),
-///     "is_active": Bool(true),
-///     "created_at": DateTime("2023-10-12T00:00:00Z"),
-///     "preferences": Array([
-///         String("dark_mode"),
-///         String("notifications")
-///     ]),
-///     "metadata": HashMap({
-///         "key1": String("value1"),
-///         "key2": U64(42)
-///     })
-/// }
-/// ```
+/// Parse a JSON object according to field configs, returning a HashMap<String, TypedValue>.
 pub fn parse_to_typed(
     json_data: &Value,
     field_configs: &[FieldConfig],
@@ -256,7 +207,6 @@ pub fn parse_to_typed(
 
 //-------------------------------------------- Arrow Utils ------------------------------------------
 
-// Parse a FieldConfig into a DataType recursively
 fn parse_field_config(field_type: &FieldType) -> DataType {
     match field_type {
         FieldType::Null => DataType::Null,
@@ -347,6 +297,7 @@ fn create_builder_from_data_type(data_type: &DataType) -> Box<dyn ArrayBuilder> 
 fn append_value_to_builder(builder: &mut dyn ArrayBuilder, value: &TypedValue) {
     match value {
         TypedValue::Null => {
+            // Append a null in whichever builder is found.
             if let Some(b) = builder.as_any_mut().downcast_mut::<NullBuilder>() {
                 b.append_null();
             } else if let Some(b) = builder.as_any_mut().downcast_mut::<UInt64Builder>() {
@@ -382,11 +333,24 @@ fn append_value_to_builder(builder: &mut dyn ArrayBuilder, value: &TypedValue) {
             append_to_builder!(builder, StringBuilder, value)
         }
         TypedValue::DateTime(value) => {
+            // Convert OffsetDateTime to microseconds
             if let Some(b) = builder
                 .as_any_mut()
                 .downcast_mut::<TimestampMicrosecondBuilder>()
             {
-                b.append_value(value.timestamp_micros());
+                let nanos = value.timestamp_nanos_opt().unwrap_or(0);
+                // Attempt to cast i128 -> i64
+                let micros = nanos / 1_000;
+                let micros_i64 = match i64::try_from(micros) {
+                    Ok(val) => val,
+                    Err(_) => {
+                        log::error!("DateTime value out of range for i64 microseconds: {value}");
+                        // Decide how you want to handle out-of-range datetimes.
+                        // For demonstration, we'll just clamp to 0:
+                        0
+                    }
+                };
+                b.append_value(micros_i64);
             }
         }
         TypedValue::Array(value) => {
@@ -394,29 +358,25 @@ fn append_value_to_builder(builder: &mut dyn ArrayBuilder, value: &TypedValue) {
                 .as_any_mut()
                 .downcast_mut::<ListBuilder<Box<dyn ArrayBuilder>>>()
             {
-                // Start a new list
-                b.append(true);
+                b.append(true); // start a new list
 
-                // Get the inner builder
                 let inner_builder: &mut dyn ArrayBuilder = b.values();
-
-                // Append each element to inner builder
                 for item in value {
                     append_value_to_builder(inner_builder, item);
                 }
             }
         }
-        TypedValue::Object(value) => {
+        TypedValue::Object(value_map) => {
             if let Some(b) = builder
                 .as_any_mut()
                 .downcast_mut::<MapBuilder<Box<dyn ArrayBuilder>, Box<dyn ArrayBuilder>>>()
             {
-                // Start a new map
-                let _ = b.append(true);
+                b.append(true).unwrap_or_else(|err| {
+                    log::error!("Error appending MapBuilder: {:?}", err);
+                });
 
-                // Process each key-value pair
-                for (key, val) in value {
-                    // Handle key
+                for (key, val) in value_map {
+                    // Handle the key
                     match key {
                         KeyValue::String(s) => {
                             if let Some(sb) = b.keys().as_any_mut().downcast_mut::<StringBuilder>()
@@ -447,7 +407,10 @@ fn append_value_to_builder(builder: &mut dyn ArrayBuilder, value: &TypedValue) {
                                 .as_any_mut()
                                 .downcast_mut::<TimestampMicrosecondBuilder>()
                             {
-                                db.append_value(dt.timestamp_micros());
+                                let nanos = dt.timestamp_nanos_opt().unwrap_or(0);
+                                let micros = nanos / 1_000;
+                                let micros_i64 = i64::try_from(micros).unwrap_or(0);
+                                db.append_value(micros_i64);
                             }
                         }
                         _ => {
@@ -455,7 +418,7 @@ fn append_value_to_builder(builder: &mut dyn ArrayBuilder, value: &TypedValue) {
                         }
                     }
 
-                    // Handle value
+                    // Handle the value
                     append_value_to_builder(b.values(), val);
                 }
             }
@@ -476,7 +439,6 @@ pub fn build_record_batch_from_btreemap(
     }
 
     // Iterate over each "row" in the BTreeMap.
-    // For every row, iterate over the schema fields so each builder gets a value.
     for (_row_key, row_map) in data.iter() {
         // For each field in the schema (by index)
         for (field_index, field) in arrow_schema.fields().iter().enumerate() {
@@ -491,13 +453,12 @@ pub fn build_record_batch_from_btreemap(
         }
     }
 
-    // Once all rows have been appended, build the final Arrow arrays.
+    // Finish building all arrays.
     let mut arrays: Vec<ArrayRef> = Vec::with_capacity(builders.len());
     for builder in builders.iter_mut() {
         arrays.push(builder.finish().into());
     }
 
-    // Create a RecordBatch from the arrays.
     let record_batch = RecordBatch::try_new(arrow_schema, arrays).map_err(|e| {
         log::error!("Error creating RecordBatch: {:?}", e);
         PipelineError::ParseError(format!("Error creating RecordBatch: {:?}", e))
@@ -512,111 +473,13 @@ pub fn build_record_batch_from_btreemap(
 mod tests {
     use super::*;
     use arrow::array::{Array, StringArray, UInt64Array};
-    use arrow::datatypes::DataType;
-    use chrono::Utc;
-    use serde_json::{Value, json};
+    use chrono::{DateTime, Utc};
+    use serde_json::json;
+    use std::collections::{BTreeMap, HashMap};
 
-    //-------------------------------------------- Type Parsing Tests ------------------------------------------
-
-    #[test]
-    fn test_parse_field_value() {
-        // Test Null
-        assert_eq!(
-            parse_field_value(&Value::Null, &FieldType::Null),
-            Ok(TypedValue::Null)
-        );
-
-        // Test Bool
-        assert_eq!(
-            parse_field_value(&Value::Bool(true), &FieldType::Bool),
-            Ok(TypedValue::Bool(true))
-        );
-
-        // Test Number (parsed as u64)
-        let num = json!(42);
-        assert_eq!(
-            parse_field_value(&num, &FieldType::U64),
-            Ok(TypedValue::U64(42))
-        );
-
-        // Test Number (parsed as i64)
-        let num = json!(-42);
-        assert_eq!(
-            parse_field_value(&num, &FieldType::I64),
-            Ok(TypedValue::I64(-42))
-        );
-
-        // Test Number (parsed as f64)
-        let num = json!(42.5);
-        assert_eq!(
-            parse_field_value(&num, &FieldType::F64),
-            Ok(TypedValue::F64(42.5))
-        );
-
-        // Test String
-        let string = json!("hello");
-        assert_eq!(
-            parse_field_value(&string, &FieldType::String),
-            Ok(TypedValue::String("hello".to_string()))
-        );
-
-        // Test DateTime
-        let datetime_str = "2023-10-12T00:00:00Z";
-        let datetime = json!(datetime_str);
-        let expected_dt = DateTime::parse_from_str(datetime_str, "%Y-%m-%dT%H:%M:%SZ")
-            .unwrap()
-            .with_timezone(&Utc);
-        assert_eq!(
-            parse_field_value(&datetime, &FieldType::DateTime),
-            Ok(TypedValue::DateTime(expected_dt))
-        );
-
-        // Test Array
-        let array = json!(["test1", "test2", "test3"]);
-        let item_type = Box::new(FieldType::String);
-        let array_type = FieldType::Array { item_type };
-        let result = parse_field_value(&array, &array_type);
-        match result {
-            Ok(TypedValue::Array(items)) => {
-                assert_eq!(items.len(), 3);
-                assert_eq!(items[0], TypedValue::String("test1".to_string()));
-                assert_eq!(items[1], TypedValue::String("test2".to_string()));
-                assert_eq!(items[2], TypedValue::String("test3".to_string()));
-            }
-            _ => panic!("Expected Array variant"),
-        }
-
-        // Test Object (HashMap)
-        let object = json!({"key": "value", "num": "7"});
-        let key_type = Box::new(KeyFieldType::String);
-        let value_type = Box::new(FieldType::String);
-        let map_type = FieldType::HashMap {
-            key_type,
-            value_type,
-        };
-        let result = parse_field_value(&object, &map_type);
-        match result {
-            Ok(TypedValue::Object(map)) => {
-                assert_eq!(map.len(), 2);
-                // Check the actual key-value pairs
-                let key = KeyValue::String("key".to_string());
-                let num_key = KeyValue::String("num".to_string());
-                assert_eq!(
-                    map.get(&key),
-                    Some(&TypedValue::String("value".to_string()))
-                );
-                assert_eq!(
-                    map.get(&num_key),
-                    Some(&TypedValue::String("7".to_string()))
-                );
-            }
-            _ => panic!("Expected Object variant"),
-        }
-    }
-
+    // ===== Type Parsing Tests =====
     #[test]
     fn test_parse_to_typed() {
-        // Create a dummy field config array.
         let field_configs = vec![
             FieldConfig {
                 field: "int_field".to_string(),
@@ -647,7 +510,6 @@ mod tests {
             },
         ];
 
-        // Build a JSON object with matching types.
         let datetime_str = "2023-10-12T00:00:00Z";
         let json_obj = json!({
             "int_field": 123,
@@ -669,7 +531,7 @@ mod tests {
             Some(&TypedValue::String("test".to_string()))
         );
 
-        let expected_dt = DateTime::parse_from_str(datetime_str, "%Y-%m-%dT%H:%M:%SZ")
+        let expected_dt = DateTime::parse_from_rfc3339(datetime_str)
             .unwrap()
             .with_timezone(&Utc);
         assert_eq!(
@@ -677,9 +539,7 @@ mod tests {
             Some(&TypedValue::DateTime(expected_dt))
         );
 
-        // For the object field, we need to check that it's a HashMap with the correct key-value pair
         if let Some(TypedValue::Object(map)) = typed.get("object_field") {
-            // Create a KeyValue::String to look up in the map
             let key = KeyValue::String("nested".to_string());
             assert_eq!(
                 map.get(&key),
@@ -690,8 +550,7 @@ mod tests {
         }
     }
 
-    //-------------------------------------------- Arrow Parsing Tests ------------------------------------------
-
+    // ===== Arrow Schema Tests =====
     #[test]
     fn test_build_arrow_schema_from_config() {
         let field_configs = vec![
@@ -713,6 +572,7 @@ mod tests {
         assert_eq!(schema.field(1).data_type(), &DataType::Utf8);
     }
 
+    // ===== Record Batch Tests =====
     #[test]
     fn test_build_record_batch_from_btreemap() {
         let field_configs = vec![

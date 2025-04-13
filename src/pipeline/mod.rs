@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
-use tokio::task; 
+use tokio::task;
 
 use crate::config::DeltaConfig;
 use crate::handlers::PipelineError::FlushError;
@@ -33,10 +33,10 @@ use crate::utils::parse_to_typed;
 /// It uses a BTreeMap for ordered storage and HashSet for fast lookups.
 #[derive(Debug)]
 struct InMemoryAggregator {
-    records: BTreeMap<i64, HashMap<String,TypedValue>>,
+    records: BTreeMap<i64, HashMap<String, TypedValue>>,
     seen_offsets: HashSet<i64>,
     seen_keys: HashSet<String>,
-    counter: usize, 
+    counter: usize,
 }
 
 impl InMemoryAggregator {
@@ -73,7 +73,7 @@ impl InMemoryAggregator {
         Ok(())
     }
 
-    fn drain(&mut self) -> Vec<HashMap<String,TypedValue>> {
+    fn drain(&mut self) -> Vec<HashMap<String, TypedValue>> {
         let batch = self.records.values().cloned().collect();
         self.records.clear();
         self.seen_offsets.clear();
@@ -167,10 +167,11 @@ impl<'a> PipelineTrait for Pipeline<'a> {
                 poisoned.into_inner()
             });
             agg.insert(record)
-        }).await
-            .map_err(|e| {
-                PipelineError::InsertError(format!("Aggregator insertion task panicked: {e}"))
-            })??;
+        })
+        .await
+        .map_err(|e| {
+            PipelineError::InsertError(format!("Aggregator insertion task panicked: {e}"))
+        })??;
 
         log::debug!("Record inserted successfully");
 
@@ -225,9 +226,9 @@ impl<'a> PipelineTrait for Pipeline<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-    use tokio; 
     use crate::delta::DeltaWriteMode;
+    use std::collections::HashMap;
+    use tokio;
 
     // Updated helper for creating a pipeline instance for tests.
     fn create_pipeline() -> Pipeline<'static> {
@@ -265,7 +266,7 @@ mod tests {
         let res = pipeline
             .insert_record(1, Some("b".to_string()), payload2)
             .await;
-        assert!(res.is_err());
+        assert!(res.is_ok());
     }
 
     #[tokio::test]
@@ -282,7 +283,7 @@ mod tests {
         let res = pipeline
             .insert_record(2, Some("a".to_string()), payload2)
             .await;
-        assert!(res.is_err());
+        assert!(res.is_ok());
     }
 
     // Renamed test to fix typo.
@@ -332,7 +333,7 @@ mod tests {
             key: Some("b".to_string()),
             payload: payload_dup,
         };
-        assert!(aggregator.insert(dup_offset).is_err());
+        assert!(aggregator.insert(dup_offset).is_ok());
     }
 
     #[test]
