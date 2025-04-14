@@ -1,23 +1,24 @@
 // This module consolidates data from multiple Kafka sources,
 // deduplicates them in parallel, and prepares atomic daily batches.
 // It also implements recovery if a crash occurs (e.g., by reading checkpoints).
+use arrow::array::{Array, ArrayAccessor, PrimitiveArray};
+use arrow::datatypes::{DataType, Int32Type, Int64Type};
 use async_trait::async_trait;
 use deltalake::kernel::{Schema, StructType};
-use deltalake::parquet::{
-    basic::{Compression, ZstdLevel},
-    file::properties::WriterProperties,
-};
-use deltalake::writer::{DeltaWriter, RecordBatchWriter};
+use deltalake::parquet::basic::{Compression, ZstdLevel};
+use deltalake::parquet::file::properties::WriterProperties;
+use deltalake::writer::{DeltaWriter, RecordBatchWriter, WriteMode};
 use deltalake::*;
 use std::collections::HashMap;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
+use tokio::sync::Mutex as TokioMutex;
 use tokio::task;
 
 use crate::config::DeltaConfig;
 use crate::handlers::PipelineError::FlushError;
 use crate::handlers::{AppError, AppResult, DeltaError, PipelineError};
-use crate::model::{MessageRecordTyped, TypedValue};
+use crate::model::{DeltaWriteMode, MessageRecordTyped, TypedValue};
 use crate::monitoring::Monitoring;
 use crate::utils::{build_record_batch_from_vec, parse_to_typed};
 
@@ -97,10 +98,10 @@ impl InMemoryAggregator {
 /// Wraps aggregator & flush logic
 pub struct Pipeline<'a> {
     delta_table: DeltaTable,
-    delta_writer: Arc<Mutex<RecordBatchWriter>>,
     delta_schema: Arc<arrow::datatypes::Schema>,
     aggregator: Arc<Mutex<InMemoryAggregator>>,
     delta_config: &'a DeltaConfig,
+    writer_properties: WriterProperties,
     monitoring: Option<&'a Monitoring>, // TODO: Implement monitoring
 }
 
@@ -123,16 +124,6 @@ impl<'a> Pipeline<'a> {
         let writer_properties = WriterProperties::builder()
             .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
             .build();
-
-        let writer = RecordBatchWriter::for_table(&delta_table).map_err(|e| {
-            log::error!("Failed to make RecordBatchWriter: {}", e);
-            AppError::Delta(DeltaError::TableError(format!(
-                "Failed to make RecordBatchWriter: {}",
-                e
-            )))
-        })?;
-
-        let delta_writer = writer.with_writer_properties(writer_properties);
 
         let metadata = delta_table.metadata().map_err(|e| {
             log::error!("Failed to get metadata for the table: {}", e);
@@ -164,17 +155,17 @@ impl<'a> Pipeline<'a> {
 
         Ok(Self {
             delta_table,
-            delta_writer: Arc::new(Mutex::new(delta_writer)),
             delta_schema: arrow_schema_ref,
             aggregator: Arc::new(Mutex::new(InMemoryAggregator::new())),
             delta_config,
+            writer_properties,
             monitoring,
         })
     }
 }
 
 #[async_trait]
-pub trait PipelineTrait {
+pub trait PipelineTrait: Send + Sync {
     // Asynchronously insert a record into the pipeline
     async fn insert_record(
         &self,
@@ -278,11 +269,50 @@ impl<'a> PipelineTrait for Pipeline<'a> {
         );
 
         // Convert batch to arrow RecordBatch
-        let arrow_table = build_record_batch_from_vec(self.delta_schema.clone(), &batch)?;
+        let arrow_batch = build_record_batch_from_vec(self.delta_schema.clone(), &batch)?;
 
-        // TODO: Implement Delta table writing logic here
+        // Determine write mode based on configuration
+        let write_mode = match self.delta_config.mode {
+            DeltaWriteMode::INSERT => WriteMode::Default,
+            DeltaWriteMode::UPSERT => WriteMode::MergeSchema,
+        };
 
-        log::info!("Flush completed.");
+        // Create a new writer for this flush operation
+        let mut writer = RecordBatchWriter::for_table(&self.delta_table)
+            .map_err(|e| {
+                log::error!("Failed to make RecordBatchWriter: {}", e);
+                AppError::Delta(DeltaError::TableError(format!(
+                    "Failed to make RecordBatchWriter: {}",
+                    e
+                )))
+            })?
+            .with_writer_properties(self.writer_properties.clone());
+
+        // Write the batch - the writer will automatically handle partitioning
+        writer
+            .write_with_mode(arrow_batch, write_mode)
+            .await
+            .map_err(|e| {
+                log::error!("Failed to write batch to Delta table: {}", e);
+                AppError::Delta(DeltaError::TableError(format!(
+                    "Failed to write batch to Delta table: {}",
+                    e
+                )))
+            })?;
+
+        // Use a separate function to handle the flush and commit
+        let adds = writer
+            .flush_and_commit(&mut self.delta_table)
+            .await
+            .map_err(|e| {
+                log::error!("Failed to flush and commit batch to Delta table: {}", e);
+                AppError::Delta(DeltaError::TableError(format!(
+                    "Failed to flush and commit batch to Delta table: {}",
+                    e
+                )))
+            })?;
+
+        log::info!("Flush completed. {} adds written", adds);
 
         Ok(())
     }
@@ -298,7 +328,7 @@ impl<'a> PipelineTrait for Pipeline<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::delta::DeltaWriteMode;
+    use crate::model::DeltaWriteMode;
     use std::collections::HashMap;
     use tokio;
 
@@ -307,7 +337,6 @@ mod tests {
         let config = Box::leak(Box::new(DeltaConfig {
             table_path: "dummy".to_string(),
             mode: DeltaWriteMode::INSERT,
-            partition: "default".to_string(),
             schema: None,
         }));
         Pipeline::new(config, None).await.unwrap()
@@ -361,7 +390,7 @@ mod tests {
     // Renamed test to fix typo.
     #[tokio::test]
     async fn test_flush_empty_the_aggregator() {
-        let pipeline = create_pipeline().await;
+        let mut pipeline = create_pipeline().await;
         let payload1 = r#"{"dummy": "payload1"}"#.to_string();
         let payload2 = r#"{"dummy": "payload2"}"#.to_string();
         pipeline

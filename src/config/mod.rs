@@ -4,10 +4,8 @@
 use serde::Deserialize;
 use std::path::Path;
 
-use crate::delta::DeltaWriteMode;
 use crate::handlers::{AppResult, ConfigError};
-use crate::model::FieldConfig;
-use crate::model::FieldType;
+use crate::model::{DeltaWriteMode, FieldConfig, FieldType};
 
 #[derive(Debug, Deserialize)]
 pub struct AppConfig {
@@ -32,7 +30,6 @@ pub struct KafkaConfig {
 #[derive(Debug, Deserialize)]
 pub struct DeltaConfig {
     pub table_path: String,
-    pub partition: String,
     pub mode: DeltaWriteMode, // Supported modes: "UPSERT" or "INSERT"
     pub schema: Option<Vec<FieldConfig>>,
 }
@@ -116,11 +113,6 @@ impl AppConfig {
             return Err(ConfigError::InvalidField("delta.table_path is empty".to_string()).into());
         }
 
-        if config.delta.partition.trim().is_empty() {
-            log::error!("Invalid config: delta.partition is empty");
-            return Err(ConfigError::InvalidField("delta.partition is empty".to_string()).into());
-        }
-
         if config.pipeline.max_buffer_size.is_none() || config.pipeline.max_buffer_size.unwrap() < 1
         {
             log::warn!(
@@ -189,7 +181,6 @@ kafka:
   timeout: 5000
 delta:
   table_path: "/data/delta/table"
-  partition: "day-time"
   mode: INSERT
   schema:
     - field: "id"
@@ -279,15 +270,6 @@ credentials:
         assert!(res.is_err());
         let err = format!("{:?}", res.err().unwrap());
         assert!(err.contains("delta.table_path is empty"));
-    }
-
-    #[test]
-    fn test_missing_delta_partition() {
-        let yaml = dummy_yaml_config().replace("day-time", "");
-        let res = load_config_from_str(&yaml);
-        assert!(res.is_err());
-        let err = format!("{:?}", res.err().unwrap());
-        assert!(err.contains("delta.partition is empty"));
     }
 
     #[test]

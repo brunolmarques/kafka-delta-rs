@@ -40,6 +40,13 @@ impl Hash for MessageRecordTyped {
 
 //--------------------------------- Delta Schema -------------------------------------
 
+#[derive(Deserialize, Debug, Clone, Copy)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum DeltaWriteMode {
+    INSERT,
+    UPSERT,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct FieldConfig {
     pub field: String,

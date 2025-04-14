@@ -28,10 +28,6 @@ test-config:
 	@echo "Running tests for config module..."
 	RUSTFLAGS=-Awarnings cargo test --package kafka-delta-rs config -- --nocapture
 
-test-delta:
-	@echo "Running tests for delta module..."
-	RUSTFLAGS=-Awarnings cargo test --package kafka-delta-rs delta -- --nocapture
-
 test-kafka:
 	@echo "Running tests for kafka module..."
 	RUSTFLAGS=-Awarnings cargo test --package kafka-delta-rs kafka -- --nocapture
@@ -110,7 +106,6 @@ help:
 	@echo "  test           - Run unit tests"
 	@echo "  test-modules   - Run unit tests for all modules"
 	@echo "  test-config    - Run tests for config module"
-	@echo "  test-delta     - Run tests for delta module"
 	@echo "  test-kafka     - Run tests for kafka module"
 	@echo "  test-utils     - Run tests for utils module"
 	@echo "  test-handlers  - Run tests for handlers module"
