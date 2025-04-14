@@ -1,8 +1,6 @@
-// src/monitoring/mod.rs
+// Monitoring and instrumentation
 
-use opentelemetry::metrics::{
-    Counter, Histogram, Meter, MeterProvider, ObservableGauge, UpDownCounter,
-};
+use opentelemetry::metrics::{Counter, Histogram, Meter, UpDownCounter};
 use opentelemetry::{KeyValue, global};
 use opentelemetry_otlp::MetricExporter;
 use opentelemetry_otlp::{Protocol, WithExportConfig};
@@ -13,12 +11,10 @@ use std::sync::OnceLock;
 use crate::config::MonitoringConfig;
 use crate::handlers::{AppError, AppResult, MonitoringError};
 
-use std::any::Any;
-
 // Add a static variable to store the meter provider.
 static METER_PROVIDER: OnceLock<SdkMeterProvider> = OnceLock::new();
 
-/// A handle fo r the telemetry system. Store references to the meter, counters, histograms, etc.
+/// A handle for the telemetry system. Store references to the meter, counters, histograms, etc.
 #[derive(Clone)]
 pub struct Monitoring {
     meter: Meter,
@@ -26,6 +22,7 @@ pub struct Monitoring {
     message_size_counter: Counter<u64>,
     kafka_commit_counter: Counter<u64>,
     offset_lag_gauge: UpDownCounter<i64>,
+    dead_letters_counter: Counter<u64>,
     delta_write_counter: Counter<u64>,
     delta_flush_histogram: Histogram<f64>,
 }
@@ -66,7 +63,6 @@ impl Monitoring {
             })?;
 
         // Create a PeriodicReader that automatically exports metrics on an interval.
-        // By default, it flushes every 60 seconds (customizable).
         let reader = PeriodicReader::builder(metrics_exporter).build();
 
         // Create a meter provider with the OTLP Metric exporter
@@ -75,10 +71,12 @@ impl Monitoring {
             .with_reader(reader)
             .build();
 
-        // Store the meter provider in the static variable.
-        let _ = METER_PROVIDER.set(meter_provider.clone());
+        // Store the meter provider in the static variable and ensure it's set
+        METER_PROVIDER
+            .set(meter_provider.clone())
+            .expect("Failed to set meter provider");
 
-        // Set the global meter provider to the one created.
+        // Set the global meter provider
         global::set_meter_provider(meter_provider.clone());
 
         // Acquire the global meter
@@ -107,6 +105,11 @@ impl Monitoring {
             .with_description("Tracks the offset lag behind the latest committed offset")
             .build();
 
+        let dead_letters_counter = meter
+            .u64_counter("kafka_dead_letters")
+            .with_description("Number of messages sent to dead letter topic")
+            .build();
+
         let delta_write_counter = meter
             .u64_counter("delta_messages_written")
             .with_description("Number of messages/records written to Delta table")
@@ -123,6 +126,7 @@ impl Monitoring {
             message_size_counter,
             kafka_commit_counter,
             offset_lag_gauge,
+            dead_letters_counter,
             delta_write_counter,
             delta_flush_histogram,
         })
@@ -141,6 +145,7 @@ impl Monitoring {
             message_size_counter: no_op_counter.clone(),
             kafka_commit_counter: no_op_counter.clone(),
             offset_lag_gauge: no_op_up_down,
+            dead_letters_counter: no_op_counter.clone(),
             delta_write_counter: no_op_counter,
             delta_flush_histogram: no_op_histogram,
         }
@@ -174,6 +179,14 @@ impl Monitoring {
             .add(lag, &[KeyValue::new("kafka_offset_lag", "offset_value")]);
     }
 
+    /// Record number of messages sent to dead letter topic.
+    pub fn record_dead_letters(&self, count: u64) {
+        self.dead_letters_counter.add(count, &[KeyValue::new(
+            "kafka_dead_letters",
+            "dead_letters_count",
+        )]);
+    }
+
     /// Record number of messages/records written to Delta.
     pub fn record_delta_write(&self, count: u64) {
         self.delta_write_counter.add(count, &[KeyValue::new(
@@ -189,20 +202,6 @@ impl Monitoring {
             "flush_time_seconds",
         )]);
     }
-
-    /// Shut down the global meter provider, ensuring final metrics are exported.
-    /// Useful if your application is about to exit and you want to ensure everything is sent.
-    pub fn shutdown() {
-        if let Some(provider) = METER_PROVIDER.get() {
-            if let Err(e) = provider.shutdown() {
-                log::error!("Failed to shut down metrics: {}", e);
-                AppError::Monitoring(MonitoringError::ShutdownError(format!(
-                    "Failed to shut down metrics: {}",
-                    e
-                )));
-            }
-        }
-    }
 }
 
 //---------------------------------------- Tests ----------------------------------------
@@ -211,17 +210,6 @@ impl Monitoring {
 mod tests {
     use super::*;
     use opentelemetry::global;
-
-    // Define a dummy MonitoringConfig for testing.
-    // Uncomment the following if the actual MonitoringConfig is not available.
-    /*
-    #[derive(Clone)]
-    pub struct MonitoringConfig {
-        pub enabled: bool,
-        pub endpoint: Option<String>,
-        pub service_name: String,
-    }
-    */
 
     // Define a helper to create a no-op config.
     fn dummy_no_op_config() -> crate::config::MonitoringConfig {
@@ -232,12 +220,11 @@ mod tests {
         }
     }
 
-    // Define a helper to create an enabled config.
-    // Using endpoint as an empty string as placeholder to avoid OTLP initialization in tests.
+    // Updated helper to create an enabled config with a valid endpoint.
     fn dummy_enabled_config() -> crate::config::MonitoringConfig {
         crate::config::MonitoringConfig {
             enabled: true,
-            endpoint: "".to_string(),
+            endpoint: "http://localhost:4318".to_string(), // valid dummy endpoint
             service_name: "test-service".to_string(),
         }
     }
@@ -266,17 +253,7 @@ mod tests {
         monitor.set_kafka_offset_lag(-3);
         monitor.record_delta_write(5);
         monitor.observe_delta_flush_time(1.2);
-        // Ensure the static meter provider is set.
+        // Ensure the static meter provider is set
         assert!(METER_PROVIDER.get().is_some(), "Meter provider not set");
-    }
-
-    #[test]
-    fn test_shutdown() {
-        // Initialize an enabled monitor to set the static meter provider.
-        let _ = Monitoring::init(&dummy_enabled_config()).expect("init failed");
-        // Call shutdown and ensure it does not panic.
-        Monitoring::shutdown();
-        // Optionally, ensure global state remains accessible.
-        let _ = global::meter("post-shutdown-meter");
     }
 }

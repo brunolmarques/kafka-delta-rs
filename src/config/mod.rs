@@ -5,6 +5,7 @@ use serde::Deserialize;
 use std::path::Path;
 
 use crate::handlers::{AppResult, ConfigError};
+use crate::model::{DeltaWriteMode, FieldConfig, FieldType};
 
 #[derive(Debug, Deserialize)]
 pub struct AppConfig {
@@ -21,6 +22,7 @@ pub struct AppConfig {
 pub struct KafkaConfig {
     pub broker: String,
     pub topics: Vec<String>,
+    pub dead_letter_topic: Option<String>, // Optional: for dead letter queue
     pub group_id: String,
     pub timeout: Option<u64>, // Optional: timeout for Kafka operations, default is 5000ms
 }
@@ -28,8 +30,8 @@ pub struct KafkaConfig {
 #[derive(Debug, Deserialize)]
 pub struct DeltaConfig {
     pub table_path: String,
-    pub partition: String,
-    pub mode: String,
+    pub mode: DeltaWriteMode, // Supported modes: "UPSERT" or "INSERT"
+    pub schema: Option<Vec<FieldConfig>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -42,7 +44,6 @@ pub struct MonitoringConfig {
     /// Whether or not monitoring is enabled
     pub enabled: bool,
     pub service_name: String,
-
     /// Pull-based endpoint for metrics
     pub endpoint: String, // e.g., "/metrics"
 }
@@ -83,7 +84,7 @@ impl AppConfig {
             ))
         })?;
 
-        let config: AppConfig = serde_yaml::from_str(&content).map_err(|e| {
+        let mut config: AppConfig = serde_yaml::from_str(&content).map_err(|e| {
             log::error!("YAML parse error in {:?}: {}", path.as_ref(), e);
             ConfigError::ReadError(format!("YAML parse error in {:?}: {}", path.as_ref(), e))
         })?;
@@ -93,6 +94,7 @@ impl AppConfig {
             log::error!("Invalid config: kafka.broker is empty");
             return Err(ConfigError::InvalidField("kafka.broker is empty".to_string()).into());
         }
+
         if config.kafka.topics.is_empty() {
             log::error!("Invalid config: kafka.topics should have at least one topic");
             return Err(ConfigError::InvalidField(
@@ -100,17 +102,15 @@ impl AppConfig {
             )
             .into());
         }
+
         if config.kafka.group_id.trim().is_empty() {
             log::error!("Invalid config: kafka.group_id is empty");
             return Err(ConfigError::InvalidField("kafka.group_id is empty".to_string()).into());
         }
+
         if config.delta.table_path.trim().is_empty() {
             log::error!("Invalid config: delta.table_path is empty");
             return Err(ConfigError::InvalidField("delta.table_path is empty".to_string()).into());
-        }
-        if config.delta.partition.trim().is_empty() {
-            log::error!("Invalid config: delta.partition is empty");
-            return Err(ConfigError::InvalidField("delta.partition is empty".to_string()).into());
         }
 
         if config.pipeline.max_buffer_size.is_none() || config.pipeline.max_buffer_size.unwrap() < 1
@@ -137,6 +137,26 @@ impl AppConfig {
             );
         }
 
+        if config.delta.schema.is_none() {
+            log::warn!("Warning: delta.schema is not set. All columns will be parsed as strings.");
+        }
+
+        // If a schema is present, check each field
+        if let Some(ref fields) = config.delta.schema {
+            for f in fields {
+                f.validate()?;
+            }
+        }
+
+        // Validate the table path and store the parsed path
+        let parsed_path = deltalake::Path::parse(&config.delta.table_path).map_err(|e| {
+            log::error!("Invalid Delta table path: {}", e);
+            ConfigError::InvalidField(format!("Invalid Delta table path: {}", e))
+        })?;
+
+        // Store the validated path back in the config
+        config.delta.table_path = parsed_path.to_string();
+
         log::info!("Configuration file loaded successfully");
         Ok(config)
     }
@@ -147,7 +167,7 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::random;
+    use crate::model::FieldType;
     use std::fs;
     use std::path::PathBuf;
 
@@ -161,8 +181,12 @@ kafka:
   timeout: 5000
 delta:
   table_path: "/data/delta/table"
-  partition: "day-time"
-  mode: "INSERT"
+  mode: INSERT
+  schema:
+    - field: "id"
+      type: "u64"
+    - field: "name"
+      type: "string"
 logging:
   level: "INFO"
 monitoring:
@@ -199,6 +223,17 @@ credentials:
         let yaml = dummy_yaml_config();
         let config: AppConfig = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(config.kafka.broker, "localhost:9092");
+
+        // Check schema fields
+        if let Some(schema) = &config.delta.schema {
+            assert_eq!(schema.len(), 2);
+            assert_eq!(schema[0].field, "id");
+            assert_eq!(schema[0].type_name, FieldType::U64);
+            assert_eq!(schema[1].field, "name");
+            assert_eq!(schema[1].type_name, FieldType::String);
+        } else {
+            panic!("Schema should be present");
+        }
     }
 
     #[test]
@@ -234,18 +269,7 @@ credentials:
         let res = load_config_from_str(&yaml);
         assert!(res.is_err());
         let err = format!("{:?}", res.err().unwrap());
-        // Updated assertion to check the full expected message.
         assert!(err.contains("delta.table_path is empty"));
-    }
-
-    #[test]
-    fn test_missing_delta_partition() {
-        let yaml = dummy_yaml_config().replace("day-time", "");
-        let res = load_config_from_str(&yaml);
-        assert!(res.is_err());
-        let err = format!("{:?}", res.err().unwrap());
-        // Updated assertion to check the full expected message.
-        assert!(err.contains("delta.partition is empty"));
     }
 
     #[test]
