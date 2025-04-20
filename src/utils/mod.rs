@@ -2,16 +2,15 @@ use arrow::array::{
     ArrayBuilder, ArrayRef, BooleanBuilder, Float64Builder, Int64Builder, ListBuilder, MapBuilder,
     NullBuilder, StringBuilder, TimestampMicrosecondBuilder, UInt64Builder,
 };
-use arrow::datatypes::{DataType, Field, Fields, Schema, TimeUnit};
+use arrow::datatypes::{DataType, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::handlers::{AppResult, PipelineError};
-use crate::model::{FieldConfig, FieldType};
-use crate::model::{KeyFieldType, KeyValue, TypedValue};
+use crate::handlers::{AppError, AppResult, ParseError, PipelineError};
+use crate::model::{KeyValue, TypedValue};
 
 //----------------------------------- Macros -------------------------------------
 
@@ -41,168 +40,122 @@ macro_rules! append_to_builder {
 
 //------------------------------- Type Parsing -------------------------------------
 
-/// Parse a single JSON Value into a TypedValue, given a FieldType definition.
-fn parse_field_value(
-    raw_value: &Value,
-    field_type: &FieldType,
-) -> Result<TypedValue, PipelineError> {
-    match field_type {
-        FieldType::Null => Ok(TypedValue::Null),
-        FieldType::U64 => {
-            parse_json_field!(raw_value, as_u64, U64)
+/// Parse a single JSON Value into a TypedValue, given an Arrow DataType.
+fn json_to_typed(value: &Value, dt: &DataType) -> AppResult<TypedValue> {
+    use TypedValue::*;
+    match (dt, value) {
+        (DataType::Utf8, Value::String(s)) => Ok(Utf8(s.clone())),
+        (DataType::Boolean, Value::Bool(b)) => Ok(Boolean(*b)),
+        (DataType::Int64, Value::Number(n)) if n.is_i64() => Ok(Int64(n.as_i64().unwrap())),
+        (DataType::Float64, Value::Number(n)) => Ok(Float64(n.as_f64().unwrap())),
+        (DataType::Date32, Value::String(s)) => {
+            let d = NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                .map_err(|e| ParseError::BadDate(s.clone(), e))?;
+            let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+            Ok(Date((d - epoch).num_days() as i32))
         }
-        FieldType::I64 => {
-            parse_json_field!(raw_value, as_i64, I64)
+        (DataType::Timestamp(TimeUnit::Microsecond, _), Value::String(s)) => {
+            let ts = DateTime::parse_from_rfc3339(s)
+                .map_err(|e| ParseError::BadTimestamp(s.clone(), e))?
+                .with_timezone(&Utc)
+                .timestamp_micros();
+            Ok(Timestamp(ts))
         }
-        FieldType::F64 => {
-            parse_json_field!(raw_value, as_f64, F64)
-        }
-        FieldType::Bool => {
-            parse_json_field!(raw_value, as_bool, Bool)
-        }
-        FieldType::String => {
-            let s = raw_value.as_str().ok_or_else(|| {
-                log::error!("Expected String, got something else: {}", &raw_value);
-                PipelineError::ParseError(format!(
-                    "Expected String, got something else: {}",
-                    raw_value
-                ))
-            })?;
-            Ok(TypedValue::String(s.to_owned()))
-        }
-        FieldType::DateTime => {
-            let s = raw_value.as_str().ok_or_else(|| {
-                log::error!(
-                    "Expected DateTime (string), got something else: {}",
-                    &raw_value
-                );
-                PipelineError::ParseError(format!(
-                    "Expected DateTime (string), got something else: {}",
-                    raw_value
-                ))
-            })?;
-            let dt = DateTime::parse_from_rfc3339(s)
-                .map_err(|e| {
-                    log::error!("Field '{}' not a valid DateTime: {}", field_type, e);
-                    PipelineError::ParseError(format!("Invalid DateTime format: {e}"))
-                })?
-                .with_timezone(&Utc);
-            Ok(TypedValue::DateTime(dt))
-        }
-        FieldType::Array { item_type } => {
-            let arr = raw_value.as_array().ok_or_else(|| {
-                log::error!("Expected JSON array, got something else: {}", &raw_value);
-                PipelineError::ParseError(format!(
-                    "Expected JSON array, got something else: {}",
-                    raw_value
-                ))
-            })?;
-
-            let mut items = Vec::new();
-            for elem in arr {
-                // Recursively parse each element with `item_type`
-                let typed_value = parse_field_value(elem, item_type)?;
-                items.push(typed_value);
+        // ---------- ARRAY ----------
+        (DataType::List(field), Value::Array(arr)) => {
+            let inner_type = field.data_type();
+            let mut parsed = Vec::with_capacity(arr.len());
+            for v in arr {
+                parsed.push(json_to_typed(v, inner_type)?);
             }
-            Ok(TypedValue::Array(items))
+            Ok(Array(parsed))
         }
-        FieldType::HashMap {
-            key_type,
-            value_type,
-        } => {
-            let obj = raw_value.as_object().ok_or_else(|| {
-                log::error!("Expected JSON object, got something else: {}", &raw_value);
-                PipelineError::ParseError(format!(
-                    "Expected JSON object, got something else: {}",
-                    raw_value
-                ))
-            })?;
+        // ---------- MAP ----------
+        (DataType::Map(field_arc, _), Value::Object(obj)) => {
+            if let DataType::Struct(fields) = field_arc.data_type() {
+                let key_field = fields.iter().find(|f| f.name() == "key").ok_or_else(|| {
+                    ParseError::TypeMismatch("map".into(), dt.clone(), value.clone())
+                })?;
+                let val_field = fields.iter().find(|f| f.name() == "value").ok_or_else(|| {
+                    ParseError::TypeMismatch("map".into(), dt.clone(), value.clone())
+                })?;
 
-            // Map key types are limited to types that impl Eq and Hash.
-            // Values are enforced when parsing the Config.yaml file.
-            let mut map = HashMap::new();
-            for (k, v) in obj.iter() {
-                // parse the key using `key_type`.
-                let typed_key = match &**key_type {
-                    KeyFieldType::U64 => {
-                        let key_value = k.parse::<u64>().map_err(|e| {
-                            log::error!("Failed to parse key as U64: {}", e);
-                            PipelineError::ParseError(format!("Failed to parse key as U64: {}", e))
-                        })?;
-                        KeyValue::U64(key_value)
-                    }
-                    KeyFieldType::I64 => {
-                        let key_value = k.parse::<i64>().map_err(|e| {
-                            log::error!("Failed to parse key as I64: {}", e);
-                            PipelineError::ParseError(format!("Failed to parse key as I64: {}", e))
-                        })?;
-                        KeyValue::I64(key_value)
-                    }
-                    KeyFieldType::Bool => {
-                        let key_value = k.parse::<bool>().map_err(|e| {
-                            log::error!("Failed to parse key as Bool: {}", e);
-                            PipelineError::ParseError(format!("Failed to parse key as Bool: {}", e))
-                        })?;
-                        KeyValue::Bool(key_value)
-                    }
-                    KeyFieldType::String => KeyValue::String(k.clone()),
-                    KeyFieldType::DateTime => {
-                        let key_value = k.parse::<DateTime<Utc>>().map_err(|e| {
-                            log::error!("Failed to parse key as DateTime: {}", e);
-                            PipelineError::ParseError(format!(
-                                "Failed to parse key as DateTime: {}",
-                                e
-                            ))
-                        })?;
-                        KeyValue::DateTime(key_value)
-                    }
-                };
+                let key_type = key_field.data_type();
+                let val_type = val_field.data_type();
 
-                // parse the value using `value_type`.
-                let typed_val = parse_field_value(v, value_type)?;
-                map.insert(typed_key, typed_val);
+                let mut map = HashMap::with_capacity(obj.len());
+                for (k, v) in obj {
+                    let key_parsed = KeyValue::from(json_to_typed(&Value::String(k.clone()), key_type)?);
+                    let val_parsed = json_to_typed(v, val_type)?;
+                    map.insert(key_parsed, val_parsed);
+                }
+
+                Ok(TypedValue::Object(map))
+            } else {
+                log::error!("Invalid map entry type: {:?}", field_arc.data_type());
+                Err(AppError::Parse(ParseError::TypeMismatch(
+                    "map".into(),
+                    dt.clone(),
+                    value.clone(),
+                )))
             }
-            Ok(TypedValue::Object(map))
+        }
+        // ---------- NULL ----------
+        (_, Value::Null) => Ok(Null),
+
+        // ---------- FALLBACK ----------
+        _ => {
+            log::error!("Unsupported data type: {:?}", dt);
+            Err(AppError::Parse(ParseError::TypeMismatch(
+                "field".into(),
+                dt.clone(),
+                value.clone(),
+            )))
         }
     }
 }
 
-/// Parse a JSON object according to field configs, returning a HashMap<String, TypedValue>.
-pub fn parse_to_typed(
+/// Parse a JSON object according to Delta table schema, returning a HashMap<String, TypedValue>.
+pub fn parse_json_object(
     json_data: &Value,
-    field_configs: &[FieldConfig],
-) -> AppResult<HashMap<String, TypedValue>> {
+    delta_schema: &Schema,
+) -> AppResult<Option<HashMap<String, TypedValue>>> {
     // We expect `json_value` to be an object
     let obj = json_data.as_object().ok_or_else(|| {
         log::error!("Expected JSON object: <invalid utf-8>");
-        PipelineError::ParseError("Expected JSON object: <invalid utf-8>".to_string())
+        ParseError::BadJsonObject("Expected JSON object".into(), json_data.clone())
     })?;
 
-    let mut typed_map = HashMap::new();
-
-    // For each field config, retrieve and parse
-    for fc in field_configs {
-        let field_name = &fc.field;
-        let field_type = &fc.type_name;
-
-        let raw_value = match obj.get(field_name) {
-            Some(val) => val,
-            None => {
-                log::error!("Missing field '{}'", field_name);
-                return Err(
-                    PipelineError::ParseError(format!("Missing field '{}'", field_name)).into(),
-                );
-            }
-        };
-
-        let typed_value = parse_field_value(raw_value, field_type).map_err(|e| {
-            log::error!("Error parsing field '{}': {}", field_name, e);
-            PipelineError::ParseError(format!("Error parsing field '{}': {}", field_name, e))
-        })?;
-
-        typed_map.insert(field_name.clone(), typed_value);
+    if obj.is_empty() {
+        return Ok(None);
     }
-    Ok(typed_map)
+
+    let mut typed_map = HashMap::with_capacity(delta_schema.fields().len());
+
+    // For each field in the Delta schema, retrieve and parse
+    for field in delta_schema.fields() {
+        let field_name = field.name();
+        let data_type = field.data_type();
+
+        let raw_value = obj
+            .get(field_name)
+            .ok_or_else(|| {
+                log::error!("Missing field '{}'", field_name);
+                ParseError::MissingField(format!("Missing field '{}'", field_name))
+            })?;
+
+        let typed_value = json_to_typed(raw_value, data_type)?;
+
+        typed_map.insert(field_name.to_string(), typed_value);
+    }
+    Ok(Some(typed_map))
+}
+
+//--------------------------------------------- GRPC Utils ---------------------------------------------
+
+pub fn parse_grpc_object(payload: &[u8], delta_schema: &Schema) -> AppResult<Option<HashMap<String, TypedValue>>> {
+    // TODO: Implement gRPC parsing
+    todo!()
 }
 
 //-------------------------------------------- Arrow Utils ------------------------------------------
@@ -273,19 +226,19 @@ fn append_value_to_builder(builder: &mut dyn ArrayBuilder, value: &TypedValue) {
         TypedValue::U64(value) => {
             append_to_builder!(builder, UInt64Builder, *value)
         }
-        TypedValue::I64(value) => {
+        TypedValue::Int64(value) => {
             append_to_builder!(builder, Int64Builder, *value)
         }
-        TypedValue::F64(value) => {
+        TypedValue::Float64(value) => {
             append_to_builder!(builder, Float64Builder, *value)
         }
-        TypedValue::Bool(value) => {
+        TypedValue::Boolean(value) => {
             append_to_builder!(builder, BooleanBuilder, *value)
         }
-        TypedValue::String(value) => {
+        TypedValue::Utf8(value) => {
             append_to_builder!(builder, StringBuilder, value)
         }
-        TypedValue::DateTime(value) => {
+        TypedValue::Timestamp(value) => {
             // Convert OffsetDateTime to microseconds
             if let Some(b) = builder
                 .as_any_mut()
@@ -297,7 +250,7 @@ fn append_value_to_builder(builder: &mut dyn ArrayBuilder, value: &TypedValue) {
                 let micros_i64 = match i64::try_from(micros) {
                     Ok(val) => val,
                     Err(_) => {
-                        log::error!("DateTime value out of range for i64 microseconds: {value}");
+                        log::error!("Timestamp value out of range for i64 microseconds: {value}");
                         // Decide how you want to handle out-of-range datetimes.
                         // For demonstration, we'll just clamp to 0:
                         0
@@ -331,7 +284,7 @@ fn append_value_to_builder(builder: &mut dyn ArrayBuilder, value: &TypedValue) {
                 for (key, val) in value_map {
                     // Handle the key
                     match key {
-                        KeyValue::String(s) => {
+                        KeyValue::Utf8(s) => {
                             if let Some(sb) = b.keys().as_any_mut().downcast_mut::<StringBuilder>()
                             {
                                 sb.append_value(s);
@@ -343,18 +296,18 @@ fn append_value_to_builder(builder: &mut dyn ArrayBuilder, value: &TypedValue) {
                                 ub.append_value(*n);
                             }
                         }
-                        KeyValue::I64(n) => {
+                        KeyValue::Int64(n) => {
                             if let Some(ib) = b.keys().as_any_mut().downcast_mut::<Int64Builder>() {
                                 ib.append_value(*n);
                             }
                         }
-                        KeyValue::Bool(b_val) => {
+                        KeyValue::Boolean(b_val) => {
                             if let Some(bb) = b.keys().as_any_mut().downcast_mut::<BooleanBuilder>()
                             {
                                 bb.append_value(*b_val);
                             }
                         }
-                        KeyValue::DateTime(dt) => {
+                        KeyValue::Timestamp(dt) => {
                             if let Some(db) = b
                                 .keys()
                                 .as_any_mut()

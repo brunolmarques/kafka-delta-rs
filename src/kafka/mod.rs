@@ -1,19 +1,21 @@
 // This module handles consuming messages from Kafka topics (with replicas) using a Rust Kafka crate (rdkafka)
 // It implements a trait for the Kafka consumer functionality and includes error handling for connection/network issues.
 use futures::StreamExt;
+use rdkafka::ClientConfig;
 use rdkafka::consumer::{CommitMode, Consumer, StreamConsumer};
 use rdkafka::error::KafkaError as RdKafkaError;
-use rdkafka::message::Message;
+use rdkafka::message::{Message, ToBytes};
 use rdkafka::producer::{FutureProducer, FutureRecord};
-use rdkafka::{ClientConfig, config};
+use std::fmt::Display;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, MessageFormat};
 use crate::handlers::{AppError, AppResult, KafkaError};
 use crate::monitoring::Monitoring;
-use crate::pipeline::PipelineTrait;
+use crate::pipeline::{Pipeline, PipelineTrait};
+use crate::utils::{parse_grpc_object, parse_json_object};
 
 // KafkaProducer struct to handle sending bad messages to the dead letter topics
 pub struct KafkaProducer<'a> {
@@ -60,7 +62,7 @@ impl<'a> KafkaProducer<'a> {
                     if let Some(monitoring) = self.monitoring {
                         monitoring.record_dead_letters(1);
                     }
-                    log::info!("Successfully sent {} to dead letter topic", payload);
+                    log::info!("Successfully sent message to dead letter topic");
                     return Ok(());
                 }
                 Err(e) => {
@@ -81,9 +83,9 @@ impl<'a> KafkaProducer<'a> {
     }
 }
 
-pub struct KafkaConsumer<'a, T: PipelineTrait> {
+pub struct KafkaConsumer<'a> {
     consumer: StreamConsumer,
-    pipeline: Arc<Mutex<T>>,
+    pipeline: Arc<Mutex<Pipeline<'a>>>,
     max_wait_secs: u64,
     max_buffer_size: usize,
     dead_letter_producer: Option<KafkaProducer<'a>>,
@@ -110,10 +112,10 @@ pub struct KafkaConsumer<'a, T: PipelineTrait> {
 /// ```
 /// The key is optional and the payload is a JSON object.
 /// The offset is used to track the position of the message in the Kafka topic.
-impl<'a, T: PipelineTrait> KafkaConsumer<'a, T> {
+impl<'a> KafkaConsumer<'a> {
     pub fn new(
         app_config: &AppConfig,
-        pipeline: Arc<Mutex<T>>,
+        pipeline: Arc<Mutex<Pipeline<'a>>>,
         monitoring: Option<&'a Monitoring>,
     ) -> AppResult<Self> {
         let consumer: StreamConsumer = ClientConfig::new()
@@ -165,7 +167,7 @@ impl<'a, T: PipelineTrait> KafkaConsumer<'a, T> {
                 Ok(borrowed_msg) => {
                     let size = &borrowed_msg.payload().map(|p| p.len() as u64).unwrap_or(0);
                     self.handle_message(&borrowed_msg).await?;
-                    if let Some(monitoring) = &self.monitoring {
+                    if let Some(monitoring) = self.monitoring {
                         monitoring.record_kafka_messages_read(1);
                         monitoring.record_kafka_messages_size(*size);
                     };
@@ -244,32 +246,51 @@ impl<'a, T: PipelineTrait> KafkaConsumer<'a, T> {
         let offset = msg.offset();
         // Convert key if present.
         let key = msg.key().map(|k| String::from_utf8_lossy(k).to_string());
-        let payload = match msg.payload_view::<str>() {
-            None => "".to_string(),
-            Some(Ok(s)) => s.to_string(),
-            Some(Err(_)) => {
-                if let Some(producer) = &self.dead_letter_producer {
-                    producer
-                        .send_to_dead_letter_topic(
-                            key,
-                            format!(
-                                "Invalid UTF-8 payload from topic '{}' at offset {}",
-                                msg.topic(),
-                                offset
-                            ),
-                        )
-                        .await?;
-                }
-                return Ok(());
+
+        let pipeline = self.pipeline.lock().unwrap();
+        let payload = match pipeline.delta_config.message_format {
+            MessageFormat::Json => {
+                let payload_str = match msg.payload_view::<str>() {
+                    Some(Ok(s)) => s.to_string(),
+                    _ => String::new(),
+                };
+                let json_value =
+                    serde_json::from_str(&payload_str).unwrap_or_else(|_| serde_json::Value::Null);
+                parse_json_object(&json_value, &pipeline.delta_schema)
+            }
+            MessageFormat::Grpc => {
+                let payload_bytes = match msg.payload_view::<[u8]>() {
+                    Some(Ok(bytes)) => bytes,
+                    _ => &[],
+                };
+                parse_grpc_object(payload_bytes, &pipeline.delta_schema)
             }
         };
 
-        self.pipeline
-            .lock()
-            .unwrap()
-            .insert_record(offset, key, payload)
-            .await?;
-        Ok(())
+        match payload {
+            Ok(None) => Ok(()), // Do nothing case payload is None
+            Ok(Some(typed_payload)) => {
+                self.pipeline
+                    .lock()
+                    .unwrap()
+                    .insert_record(offset, key, typed_payload)
+                    .await
+            }
+            Err(e) => {
+                // TODO: send msg to the dead letter topic
+                if let Some(producer) = &self.dead_letter_producer {
+                    // Create a string representation of the error
+                    let error_msg = format!(
+                        "Error processing message from topic '{}' at offset {}: {:?}",
+                        msg.topic(),
+                        offset,
+                        e
+                    );
+                    producer.send_to_dead_letter_topic(key, error_msg).await?;
+                }
+                Ok(())
+            }
+        }
     }
 }
 

@@ -1,3 +1,5 @@
+use arrow::datatypes::DataType;
+use serde_json::Value;
 // Custom error definitions for the application.
 use thiserror::Error;
 
@@ -35,9 +37,24 @@ pub enum PipelineError {
 
     #[error("Failed to flush aggregator: {0}")]
     FlushError(String),
+}
 
-    #[error("Failed to parse message to Delta schema: {0}")]
-    ParseError(String),
+#[derive(Debug, Error, PartialEq)]
+pub enum ParseError {
+    #[error("missing required column `{0}`")]
+    MissingField(String),
+
+    #[error("type mismatch for `{0}` - expected {1:?}, got {2}")]
+    TypeMismatch(String, DataType, Value),
+
+    #[error("bad timestamp `{0}`: {1}")]
+    BadTimestamp(String, #[source] chrono::ParseError),
+
+    #[error("bad date `{0}`: {1}")]
+    BadDate(String, #[source] chrono::ParseError),
+
+    #[error("bad object `{0}`: {1}")]
+    BadJsonObject(String, Value),
 }
 
 /// Errors related to writing or reading data from Delta
@@ -77,6 +94,9 @@ pub enum AppError {
 
     #[error("Telemetry error: {0}")]
     Monitoring(#[from] MonitoringError),
+
+    #[error("Parse error: {0}")]
+    Parse(#[from] ParseError),
 
 }
 

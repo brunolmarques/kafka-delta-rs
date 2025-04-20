@@ -1,8 +1,8 @@
 // This module consolidates data from multiple Kafka sources,
 // deduplicates them in parallel, and prepares atomic daily batches.
 // It also implements recovery if a crash occurs (e.g., by reading checkpoints).
-use arrow::array::{Array, ArrayAccessor, PrimitiveArray};
-use arrow::datatypes::{DataType, Int32Type, Int64Type};
+use arrow::array::Array;
+use arrow::datatypes::DataType;
 use async_trait::async_trait;
 use deltalake::kernel::{Schema, StructType};
 use deltalake::parquet::basic::{Compression, ZstdLevel};
@@ -12,15 +12,16 @@ use deltalake::*;
 use std::collections::HashMap;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
-use tokio::sync::Mutex as TokioMutex;
 use tokio::task;
 
-use crate::config::DeltaConfig;
+use crate::config::{DeltaConfig, DeltaWriteMode};
 use crate::handlers::PipelineError::FlushError;
 use crate::handlers::{AppError, AppResult, DeltaError, PipelineError};
-use crate::model::{DeltaWriteMode, MessageRecordTyped, TypedValue};
+use crate::model::{MessageRecordTyped, TypedValue};
 use crate::monitoring::Monitoring;
 use crate::utils::{build_record_batch_from_vec, parse_to_typed};
+use arrow::array::ArrayBuilder;
+
 
 /// Buffer used for consolidating messages
 /// Example of the aggregator:
@@ -44,16 +45,16 @@ struct InMemoryAggregator {
     records: BTreeMap<i64, HashMap<String, TypedValue>>,
     seen_offsets: HashSet<i64>,
     seen_keys: HashSet<String>,
-    counter: usize,
+    counter: usize
 }
 
 impl InMemoryAggregator {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             records: BTreeMap::new(),
             seen_offsets: HashSet::new(),
             seen_keys: HashSet::new(),
-            counter: 0, // initialize counter
+            counter: 0,
         }
     }
 
@@ -98,9 +99,9 @@ impl InMemoryAggregator {
 /// Wraps aggregator & flush logic
 pub struct Pipeline<'a> {
     delta_table: DeltaTable,
-    delta_schema: Arc<arrow::datatypes::Schema>,
+    pub delta_schema: Arc<arrow::datatypes::Schema>,
     aggregator: Arc<Mutex<InMemoryAggregator>>,
-    delta_config: &'a DeltaConfig,
+    pub delta_config: &'a DeltaConfig,
     writer_properties: WriterProperties,
     monitoring: Option<&'a Monitoring>, // TODO: Implement monitoring
 }
@@ -171,7 +172,7 @@ pub trait PipelineTrait: Send + Sync {
         &self,
         offset: i64,
         key: Option<String>,
-        payload: String,
+        payload: HashMap<String, TypedValue>,
     ) -> AppResult<()>;
 
     // Asynchronously flush the pipeline data
@@ -188,30 +189,13 @@ impl<'a> PipelineTrait for Pipeline<'a> {
         &self,
         offset: i64,
         key: Option<String>,
-        payload: String,
+        payload: HashMap<String, TypedValue>,
     ) -> AppResult<()> {
-        // Parse the incoming string as JSON
-        // TODO: Send invalid messages to dead letter topic
-        let parsed_json: serde_json::Value = serde_json::from_str(&payload)
-            .map_err(|e| PipelineError::ParseError(format!("Invalid JSON: {e}")))?;
-
-        // If there is a schema in config, apply parse_to_typed
-        let typed_fields = if let Some(field_configs) = &self.delta_config.schema {
-            parse_to_typed(&parsed_json, field_configs)?
-        } else {
-            // Deal with no schema, treat all columns as strings
-            let mut typed_fields = HashMap::new();
-            for (key, value) in parsed_json.as_object().unwrap() {
-                typed_fields.insert(key.clone(), TypedValue::String(value.to_string()));
-            }
-            typed_fields
-        };
-
         // Build the record with typed fields
         let record = MessageRecordTyped {
             offset,
             key,
-            payload: typed_fields,
+            payload,
         };
 
         let aggregator = self.aggregator.clone();
