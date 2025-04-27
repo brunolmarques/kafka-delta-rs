@@ -6,6 +6,7 @@
 mod config;
 mod handlers;
 mod kafka;
+mod delta;
 mod logging;
 mod model;
 mod monitoring;

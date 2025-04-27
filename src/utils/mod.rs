@@ -1,15 +1,16 @@
 use arrow::array::{
-    ArrayBuilder, ArrayRef, BooleanBuilder, Float64Builder, Int64Builder, ListBuilder, MapBuilder,
-    NullBuilder, StringBuilder, TimestampMicrosecondBuilder, UInt64Builder,
+    ArrayBuilder, ArrayRef, BooleanBuilder, Float64Builder, Int32Builder, Int64Builder,
+    ListBuilder, MapBuilder, NullBuilder, StringBuilder, TimestampMicrosecondBuilder,
+    UInt64Builder,
 };
-use arrow::datatypes::{DataType, Schema, TimeUnit};
+use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::handlers::{AppError, AppResult, ParseError, PipelineError};
+use crate::handlers::{AppError, AppResult, ParseError};
 use crate::model::{KeyValue, TypedValue};
 
 //----------------------------------- Macros -------------------------------------
@@ -85,7 +86,8 @@ fn json_to_typed(value: &Value, dt: &DataType) -> AppResult<TypedValue> {
 
                 let mut map = HashMap::with_capacity(obj.len());
                 for (k, v) in obj {
-                    let key_parsed = KeyValue::from(json_to_typed(&Value::String(k.clone()), key_type)?);
+                    let key_parsed =
+                        KeyValue::from(json_to_typed(&Value::String(k.clone()), key_type)?);
                     let val_parsed = json_to_typed(v, val_type)?;
                     map.insert(key_parsed, val_parsed);
                 }
@@ -137,12 +139,10 @@ pub fn parse_json_object(
         let field_name = field.name();
         let data_type = field.data_type();
 
-        let raw_value = obj
-            .get(field_name)
-            .ok_or_else(|| {
-                log::error!("Missing field '{}'", field_name);
-                ParseError::MissingField(format!("Missing field '{}'", field_name))
-            })?;
+        let raw_value = obj.get(field_name).ok_or_else(|| {
+            log::error!("Missing field '{}'", field_name);
+            ParseError::MissingField(format!("Missing field '{}'", field_name))
+        })?;
 
         let typed_value = json_to_typed(raw_value, data_type)?;
 
@@ -153,7 +153,10 @@ pub fn parse_json_object(
 
 //--------------------------------------------- GRPC Utils ---------------------------------------------
 
-pub fn parse_grpc_object(payload: &[u8], delta_schema: &Schema) -> AppResult<Option<HashMap<String, TypedValue>>> {
+pub fn parse_grpc_object(
+    payload: &[u8],
+    delta_schema: &Schema,
+) -> AppResult<Option<HashMap<String, TypedValue>>> {
     // TODO: Implement gRPC parsing
     todo!()
 }
@@ -239,14 +242,12 @@ fn append_value_to_builder(builder: &mut dyn ArrayBuilder, value: &TypedValue) {
             append_to_builder!(builder, StringBuilder, value)
         }
         TypedValue::Timestamp(value) => {
-            // Convert OffsetDateTime to microseconds
             if let Some(b) = builder
                 .as_any_mut()
                 .downcast_mut::<TimestampMicrosecondBuilder>()
             {
-                let nanos = value.timestamp_nanos_opt().unwrap_or(0);
-                // Attempt to cast i128 -> i64
-                let micros = nanos / 1_000;
+                // Convert directly from i64 to microseconds
+                let micros = *value / 1_000;
                 let micros_i64 = match i64::try_from(micros) {
                     Ok(val) => val,
                     Err(_) => {
@@ -257,6 +258,12 @@ fn append_value_to_builder(builder: &mut dyn ArrayBuilder, value: &TypedValue) {
                     }
                 };
                 b.append_value(micros_i64);
+            }
+        }
+        TypedValue::Date(value) => {
+            // Handle Date type - convert to days since epoch
+            if let Some(b) = builder.as_any_mut().downcast_mut::<Int32Builder>() {
+                b.append_value(*value);
             }
         }
         TypedValue::Array(value) => {
@@ -313,14 +320,16 @@ fn append_value_to_builder(builder: &mut dyn ArrayBuilder, value: &TypedValue) {
                                 .as_any_mut()
                                 .downcast_mut::<TimestampMicrosecondBuilder>()
                             {
-                                let nanos = dt.timestamp_nanos_opt().unwrap_or(0);
-                                let micros = nanos / 1_000;
+                                // Convert directly from i64 to microseconds
+                                let micros = *dt / 1_000;
                                 let micros_i64 = i64::try_from(micros).unwrap_or(0);
                                 db.append_value(micros_i64);
                             }
                         }
-                        _ => {
-                            log::warn!("Unsupported map key type: {:?}", key);
+                        KeyValue::Date(value) => {
+                            if let Some(db) = b.keys().as_any_mut().downcast_mut::<Int32Builder>() {
+                                db.append_value(*value);
+                            }
                         }
                     }
 
@@ -333,7 +342,7 @@ fn append_value_to_builder(builder: &mut dyn ArrayBuilder, value: &TypedValue) {
 }
 
 pub fn build_record_batch_from_vec(
-    arrow_schema: Arc<Schema>,
+    arrow_schema: Schema,
     data: &[HashMap<String, TypedValue>],
 ) -> AppResult<RecordBatch> {
     // For each field in the schema, create a corresponding array builder.
@@ -365,9 +374,9 @@ pub fn build_record_batch_from_vec(
         arrays.push(builder.finish().into());
     }
 
-    let record_batch = RecordBatch::try_new(arrow_schema, arrays).map_err(|e| {
+    let record_batch = RecordBatch::try_new(Arc::new(arrow_schema), arrays).map_err(|e| {
         log::error!("Error creating RecordBatch: {:?}", e);
-        PipelineError::ParseError(format!("Error creating RecordBatch: {:?}", e))
+        ParseError::ArrowBatchError(format!("Error creating RecordBatch: {:?}", e))
     })?;
 
     Ok(record_batch)
@@ -379,103 +388,23 @@ pub fn build_record_batch_from_vec(
 mod tests {
     use super::*;
     use arrow::array::{Array, StringArray, UInt64Array};
-    use chrono::{DateTime, Utc};
-    use serde_json::json;
-    use std::collections::{BTreeMap, HashMap};
-
-    // ===== Type Parsing Tests =====
-    #[test]
-    fn test_parse_to_typed() {
-        let field_configs = vec![
-            FieldConfig {
-                field: "int_field".to_string(),
-                type_name: FieldType::U64,
-            },
-            FieldConfig {
-                field: "float_field".to_string(),
-                type_name: FieldType::F64,
-            },
-            FieldConfig {
-                field: "bool_field".to_string(),
-                type_name: FieldType::Bool,
-            },
-            FieldConfig {
-                field: "string_field".to_string(),
-                type_name: FieldType::String,
-            },
-            FieldConfig {
-                field: "datetime_field".to_string(),
-                type_name: FieldType::DateTime,
-            },
-            FieldConfig {
-                field: "object_field".to_string(),
-                type_name: FieldType::HashMap {
-                    key_type: Box::new(KeyFieldType::String),
-                    value_type: Box::new(FieldType::String),
-                },
-            },
-        ];
-
-        let datetime_str = "2023-10-12T00:00:00Z";
-        let json_obj = json!({
-            "int_field": 123,
-            "float_field": 45.67,
-            "bool_field": true,
-            "string_field": "test",
-            "datetime_field": datetime_str,
-            "object_field": { "nested": "value" }
-        });
-
-        let typed = parse_to_typed(&json_obj, &field_configs)
-            .expect("Parsing to typed values should succeed");
-
-        assert_eq!(typed.get("int_field"), Some(&TypedValue::U64(123)));
-        assert_eq!(typed.get("float_field"), Some(&TypedValue::F64(45.67)));
-        assert_eq!(typed.get("bool_field"), Some(&TypedValue::Bool(true)));
-        assert_eq!(
-            typed.get("string_field"),
-            Some(&TypedValue::String("test".to_string()))
-        );
-
-        let expected_dt = DateTime::parse_from_rfc3339(datetime_str)
-            .unwrap()
-            .with_timezone(&Utc);
-        assert_eq!(
-            typed.get("datetime_field"),
-            Some(&TypedValue::DateTime(expected_dt))
-        );
-
-        if let Some(TypedValue::Object(map)) = typed.get("object_field") {
-            let key = KeyValue::String("nested".to_string());
-            assert_eq!(
-                map.get(&key),
-                Some(&TypedValue::String("value".to_string()))
-            );
-        } else {
-            panic!("Expected 'object_field' to be an Object variant");
-        }
-    }
-
-    // ===== Record Batch Tests =====
-    fn create_mock_schema() -> Arc<Schema> {
-        let fields = vec![
-            Field::new("id", DataType::UInt64, true),
-            Field::new("name", DataType::Utf8, true),
-        ];
-        Arc::new(Schema::new(Fields::from(fields)))
-    }
+    use arrow::datatypes::{DataType, Field, Fields, Schema};
+    use std::collections::HashMap;
 
     #[test]
     fn test_build_record_batch_from_vec() {
-        let schema = create_mock_schema();
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::UInt64, true),
+            Field::new("name", DataType::Utf8, true),
+        ]);
         let data = vec![
             HashMap::from([
                 ("id".to_string(), TypedValue::U64(1)),
-                ("name".to_string(), TypedValue::String("test1".to_string())),
+                ("name".to_string(), TypedValue::Utf8("test1".to_string())),
             ]),
             HashMap::from([
                 ("id".to_string(), TypedValue::U64(2)),
-                ("name".to_string(), TypedValue::String("test2".to_string())),
+                ("name".to_string(), TypedValue::Utf8("test2".to_string())),
             ]),
         ];
 
@@ -501,7 +430,10 @@ mod tests {
 
     #[test]
     fn test_build_record_batch_with_nulls() {
-        let schema = create_mock_schema();
+        let schema = Schema::new(vec![
+            Field::new("id", DataType::UInt64, true),
+            Field::new("name", DataType::Utf8, true),
+        ]);
         let data = vec![
             HashMap::from([
                 ("id".to_string(), TypedValue::U64(1)),
@@ -509,7 +441,7 @@ mod tests {
             ]),
             HashMap::from([
                 ("id".to_string(), TypedValue::Null),
-                ("name".to_string(), TypedValue::String("test2".to_string())),
+                ("name".to_string(), TypedValue::Utf8("test2".to_string())),
             ]),
         ];
 

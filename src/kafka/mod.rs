@@ -277,7 +277,6 @@ impl<'a> KafkaConsumer<'a> {
                     .await
             }
             Err(e) => {
-                // TODO: send msg to the dead letter topic
                 if let Some(producer) = &self.dead_letter_producer {
                     // Create a string representation of the error
                     let error_msg = format!(

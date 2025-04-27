@@ -55,6 +55,9 @@ pub enum ParseError {
 
     #[error("bad object `{0}`: {1}")]
     BadJsonObject(String, Value),
+
+    #[error("Arrow batch error: {0}")]
+    ArrowBatchError(String),
 }
 
 /// Errors related to writing or reading data from Delta
