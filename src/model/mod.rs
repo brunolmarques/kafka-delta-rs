@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
-
 //--------------------------------- Kafka Message -------------------------------------
 
 #[derive(Debug, Clone)]
@@ -36,6 +35,7 @@ impl Hash for MessageRecordTyped {
 
 //--------------------------------- Delta Schema -------------------------------------
 
+#[allow(dead_code)]
 /// An enum to hold typed field values
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypedValue {
@@ -71,8 +71,8 @@ impl From<TypedValue> for KeyValue {
             TypedValue::Date(d) => KeyValue::Date(d),
             TypedValue::Timestamp(t) => KeyValue::Timestamp(t),
             _ => {
-                log::error!("Unsupported TypedValue type: {:?}", value);
-                panic!("Unsupported TypedValue type: {:?}", value);
+                log::error!("Unsupported TypedValue type: {value:?}");
+                panic!("Unsupported TypedValue type: {value:?}");
             }
         }
     }

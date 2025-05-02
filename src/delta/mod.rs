@@ -1,7 +1,10 @@
-use async_trait::async_trait;
 use arrow::record_batch::RecordBatch;
-use deltalake::{writer::{DeltaWriter, RecordBatchWriter, WriteMode}, DeltaTable};
+use async_trait::async_trait;
 use deltalake::parquet::file::properties::WriterProperties;
+use deltalake::{
+    DeltaTable,
+    writer::{DeltaWriter, RecordBatchWriter, WriteMode},
+};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -17,8 +20,8 @@ pub trait DeltaIo: Send + Sync {
 
 /// Production implementation --------------------------------------------------
 pub struct DeltaWriterIo {
-    table:  Arc<Mutex<DeltaTable>>,
-    properties:  WriterProperties,
+    table: Arc<Mutex<DeltaTable>>,
+    properties: WriterProperties,
 }
 
 impl DeltaWriterIo {
@@ -34,31 +37,28 @@ impl DeltaIo for DeltaWriterIo {
 
         let mut writer = RecordBatchWriter::for_table(&tbl_guard)
             .map_err(|e| {
-                log::error!("Failed to create RecordBatchWriter: {}", e);
+                log::error!("Failed to create RecordBatchWriter: {e}");
                 AppError::Delta(DeltaError::TableError(format!(
-                    "Failed to create RecordBatchWriter: {}",
-                    e
+                    "Failed to create RecordBatchWriter: {e}"
                 )))
             })?
-            .with_writer_properties(self.properties.clone());           
+            .with_writer_properties(self.properties.clone());
 
         // write the batch to the table
         writer.write_with_mode(batch, mode).await.map_err(|e| {
-            log::error!("Failed to write batch to Delta table: {}", e);
+            log::error!("Failed to write batch to Delta table: {e}");
             AppError::Delta(DeltaError::TableError(e.to_string()))
         })?;
 
         // flush and commit the batch to the table
-        let adds = writer.flush_and_commit(&mut tbl_guard).await.map_err(|e|{
-            log::error!("Failed to flush and commit batch to Delta table: {}", e);
+        let adds = writer.flush_and_commit(&mut tbl_guard).await.map_err(|e| {
+            log::error!("Failed to flush and commit batch to Delta table: {e}");
             AppError::Delta(DeltaError::TableError(format!(
-                "Failed to flush and commit batch to Delta table: {}",
-                e
+                "Failed to flush and commit batch to Delta table: {e}"
             )))
         })?;
-
         log::info!("Flush completed. {} adds written", adds);
-        
+
         Ok(())
     }
 }

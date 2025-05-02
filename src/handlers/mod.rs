@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 use arrow::datatypes::DataType;
 use serde_json::Value;
 // Custom error definitions for the application.
@@ -24,9 +25,6 @@ pub enum KafkaError {
 
     #[error("Kafka communication lost: {0}")]
     CommunicationLost(String),
-
-    #[error("Kafka timeout occurred: {0}")]
-    Timeout(String),
 }
 
 /// Errors related to the data pipeline/aggregator
@@ -75,9 +73,6 @@ pub enum DeltaError {
 pub enum MonitoringError {
     #[error("Telemetry endpoint error: {0}")]
     ExporterError(String),
-
-    #[error("Telemetry shutdown error: {0}")]
-    ShutdownError(String),
 }
 
 /// A top-level application error enum combining sub-errors
@@ -100,7 +95,6 @@ pub enum AppError {
 
     #[error("Parse error: {0}")]
     Parse(#[from] ParseError),
-
 }
 
 /// A specialized result type for our application

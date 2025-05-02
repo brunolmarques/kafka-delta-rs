@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 // Responsible for parsing a YAML configuration file and merging with CLI arguments
 // Dependencies: serde, serde_yaml, structopt/clap
 use serde::Deserialize;
@@ -5,6 +6,7 @@ use std::path::Path;
 
 use crate::handlers::{AppResult, ConfigError};
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct AppConfig {
     pub kafka: KafkaConfig,
@@ -25,6 +27,7 @@ pub struct KafkaConfig {
     pub timeout: Option<u64>, // Optional: timeout for Kafka operations, default is 5000ms
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct DeltaConfig {
     /// Path to the Delta table
@@ -47,11 +50,11 @@ pub enum MessageFormat {
     Grpc,
 }
 
-#[derive(Deserialize, Debug, Clone, Copy)]
-#[serde(rename_all = "UPPERCASE")]
+#[derive(Debug, Deserialize, Clone, Copy)]
+#[serde(rename_all = "PascalCase")]
 pub enum DeltaWriteMode {
-    INSERT,
-    UPSERT,
+    Insert,
+    Upsert,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,8 +73,10 @@ pub struct MonitoringConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct ConcurrencyConfig {
+    #[allow(dead_code)]
     pub thread_pool_size: Option<usize>, // None means unlimited
-    pub retry_attempts: Option<usize>,   // None means no retries
+    #[allow(dead_code)]
+    pub retry_attempts: Option<usize>, // None means no retries
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,6 +85,7 @@ pub struct PipelineConfig {
     pub max_wait_secs: Option<u64>, // Optional max wait time threshold between each batch processing
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct CredentialsConfig {
     pub kafka_username: String,
@@ -159,8 +165,8 @@ impl AppConfig {
 
         // Validate the table path and store the parsed path
         let parsed_path = deltalake::Path::parse(&config.delta.table_path).map_err(|e| {
-            log::error!("Invalid Delta table path: {}", e);
-            ConfigError::InvalidField(format!("Invalid Delta table path: {}", e))
+            log::error!("Invalid Delta table path: {e}");
+            ConfigError::InvalidField(format!("Invalid Delta table path: {e}"))
         })?;
 
         // Store the validated path back in the config
@@ -189,7 +195,9 @@ kafka:
   timeout: 5000
 delta:
   table_path: "/data/delta/table"
-  mode: INSERT
+  mode: Insert
+  message_format: json
+  buffer_size: 10
 logging:
   level: "INFO"
 monitoring:
@@ -214,7 +222,7 @@ credentials:
     fn load_config_from_str(yaml: &str) -> AppResult<AppConfig> {
         let random_number: u64 = rand::random();
         let tmp_path: PathBuf =
-            std::env::temp_dir().join(format!("temp_config_{}.yaml", random_number));
+            std::env::temp_dir().join(format!("temp_config_{random_number}.yaml"));
         fs::write(&tmp_path, yaml).unwrap();
         let config = AppConfig::load_config(&tmp_path);
         fs::remove_file(&tmp_path).unwrap_or(());

@@ -1,9 +1,10 @@
+#[allow(dead_code)]
 use arrow::array::{
     ArrayBuilder, ArrayRef, BooleanBuilder, Float64Builder, Int32Builder, Int64Builder,
     ListBuilder, MapBuilder, NullBuilder, StringBuilder, TimestampMicrosecondBuilder,
     UInt64Builder,
 };
-use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+use arrow::datatypes::{DataType, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::Value;
@@ -41,6 +42,7 @@ macro_rules! append_to_builder {
 
 //------------------------------- Type Parsing -------------------------------------
 
+#[allow(dead_code)]
 /// Parse a single JSON Value into a TypedValue, given an Arrow DataType.
 fn json_to_typed(value: &Value, dt: &DataType) -> AppResult<TypedValue> {
     use TypedValue::*;
@@ -107,7 +109,7 @@ fn json_to_typed(value: &Value, dt: &DataType) -> AppResult<TypedValue> {
 
         // ---------- FALLBACK ----------
         _ => {
-            log::error!("Unsupported data type: {:?}", dt);
+            log::error!("Unsupported data type: {dt:?}");
             Err(AppError::Parse(ParseError::TypeMismatch(
                 "field".into(),
                 dt.clone(),
@@ -117,6 +119,7 @@ fn json_to_typed(value: &Value, dt: &DataType) -> AppResult<TypedValue> {
     }
 }
 
+#[allow(dead_code)]
 /// Parse a JSON object according to Delta table schema, returning a HashMap<String, TypedValue>.
 pub fn parse_json_object(
     json_data: &Value,
@@ -140,8 +143,8 @@ pub fn parse_json_object(
         let data_type = field.data_type();
 
         let raw_value = obj.get(field_name).ok_or_else(|| {
-            log::error!("Missing field '{}'", field_name);
-            ParseError::MissingField(format!("Missing field '{}'", field_name))
+            log::error!("Missing field '{field_name}'");
+            ParseError::MissingField(format!("Missing field '{field_name}'"))
         })?;
 
         let typed_value = json_to_typed(raw_value, data_type)?;
@@ -153,9 +156,10 @@ pub fn parse_json_object(
 
 //--------------------------------------------- GRPC Utils ---------------------------------------------
 
+#[allow(dead_code)]
 pub fn parse_grpc_object(
-    payload: &[u8],
-    delta_schema: &Schema,
+    #[allow(unused)] payload: &[u8],
+    #[allow(unused)] delta_schema: &Schema,
 ) -> AppResult<Option<HashMap<String, TypedValue>>> {
     // TODO: Implement gRPC parsing
     todo!()
@@ -181,7 +185,7 @@ fn create_builder_from_data_type(data_type: &DataType) -> Box<dyn ArrayBuilder> 
         DataType::Map(entries, _sorted) => {
             let (key_type, value_type) = match entries.data_type() {
                 DataType::Struct(fields) => {
-                    let key_type = fields.get(0).unwrap().data_type();
+                    let key_type = fields.first().unwrap().data_type();
                     let value_type = fields.get(1).unwrap().data_type();
                     (key_type, value_type)
                 }
@@ -197,8 +201,8 @@ fn create_builder_from_data_type(data_type: &DataType) -> Box<dyn ArrayBuilder> 
             ))
         }
         _ => {
-            log::error!("Unsupported data type: {:?}", data_type);
-            panic!("Unsupported data type: {:?}", data_type);
+            log::error!("Unsupported data type: {data_type:?}");
+            panic!("Unsupported data type: {data_type:?}");
         }
     }
 }
@@ -248,16 +252,7 @@ fn append_value_to_builder(builder: &mut dyn ArrayBuilder, value: &TypedValue) {
             {
                 // Convert directly from i64 to microseconds
                 let micros = *value / 1_000;
-                let micros_i64 = match i64::try_from(micros) {
-                    Ok(val) => val,
-                    Err(_) => {
-                        log::error!("Timestamp value out of range for i64 microseconds: {value}");
-                        // Decide how you want to handle out-of-range datetimes.
-                        // For demonstration, we'll just clamp to 0:
-                        0
-                    }
-                };
-                b.append_value(micros_i64);
+                b.append_value(micros);
             }
         }
         TypedValue::Date(value) => {
@@ -285,7 +280,7 @@ fn append_value_to_builder(builder: &mut dyn ArrayBuilder, value: &TypedValue) {
                 .downcast_mut::<MapBuilder<Box<dyn ArrayBuilder>, Box<dyn ArrayBuilder>>>()
             {
                 b.append(true).unwrap_or_else(|err| {
-                    log::error!("Error appending MapBuilder: {:?}", err);
+                    log::error!("Error appending MapBuilder: {err:?}");
                 });
 
                 for (key, val) in value_map {
@@ -322,8 +317,7 @@ fn append_value_to_builder(builder: &mut dyn ArrayBuilder, value: &TypedValue) {
                             {
                                 // Convert directly from i64 to microseconds
                                 let micros = *dt / 1_000;
-                                let micros_i64 = i64::try_from(micros).unwrap_or(0);
-                                db.append_value(micros_i64);
+                                db.append_value(micros);
                             }
                         }
                         KeyValue::Date(value) => {
@@ -349,6 +343,7 @@ pub fn build_record_batch_from_vec(
     let mut builders: Vec<Box<dyn ArrayBuilder>> = Vec::new();
 
     for field in arrow_schema.fields().iter() {
+        log::info!("Building builder for field: {}", field.name());
         let builder: Box<dyn ArrayBuilder> = create_builder_from_data_type(field.data_type());
         builders.push(builder);
     }
@@ -371,12 +366,12 @@ pub fn build_record_batch_from_vec(
     // Finish building all arrays.
     let mut arrays: Vec<ArrayRef> = Vec::with_capacity(builders.len());
     for builder in builders.iter_mut() {
-        arrays.push(builder.finish().into());
+        arrays.push(builder.finish());
     }
 
     let record_batch = RecordBatch::try_new(Arc::new(arrow_schema), arrays).map_err(|e| {
-        log::error!("Error creating RecordBatch: {:?}", e);
-        ParseError::ArrowBatchError(format!("Error creating RecordBatch: {:?}", e))
+        log::error!("Error creating RecordBatch: {e:?}");
+        ParseError::ArrowBatchError(format!("Error creating RecordBatch: {e:?}"))
     })?;
 
     Ok(record_batch)
@@ -388,7 +383,7 @@ pub fn build_record_batch_from_vec(
 mod tests {
     use super::*;
     use arrow::array::{Array, StringArray, UInt64Array};
-    use arrow::datatypes::{DataType, Field, Fields, Schema};
+    use arrow::datatypes::{DataType, Field, Schema};
     use std::collections::HashMap;
 
     #[test]
