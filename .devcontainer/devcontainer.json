@@ -1,0 +1,22 @@
+{
+    "name": "cursor-ai‑rust",
+    "build": {
+      "dockerfile": "Dockerfile"
+    },
+    "features": {
+      // optional: declarative extras such as "ghcr.io/devcontainers/features/azure-cli:1"
+    },
+    "postCreateCommand": "rustup component add clippy && cargo fetch",
+    "customizations": {
+      "vscode": {
+        "settings": {
+          "terminal.integrated.defaultProfile.linux": "bash"
+        },
+        "extensions": [
+          "rust-lang.rust-analyzer",
+          "serayuzgur.crates"
+        ]
+      }
+    }
+  }
+  

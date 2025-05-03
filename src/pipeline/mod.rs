@@ -36,7 +36,7 @@ use crate::utils::build_record_batch_from_vec;
 /// The `InMemoryAggregator` is a simple in-memory data structure
 /// that stores messages with unique offsets and keys.
 /// It uses a BTreeMap for ordered storage and HashSet for fast lookups.
-#[allow(dead_code)]
+#[allow(dead_code)] // TODO: remove
 #[derive(Debug)]
 struct InMemoryAggregator {
     records: BTreeMap<i64, HashMap<String, TypedValue>>,
@@ -45,7 +45,7 @@ struct InMemoryAggregator {
     counter: usize,
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // TODO: remove
 impl InMemoryAggregator {
     pub fn new() -> Self {
         Self {
@@ -95,7 +95,7 @@ impl InMemoryAggregator {
 }
 
 /// Wraps aggregator & flush logic
-#[allow(dead_code)]
+#[allow(dead_code)]  // TODO: remove
 pub struct Pipeline<'a> {
     delta_io: Box<dyn DeltaIo>,
     pub delta_schema: arrow::datatypes::Schema,
@@ -104,7 +104,7 @@ pub struct Pipeline<'a> {
     monitoring: Option<&'a Monitoring>, // TODO: Implement monitoring
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // TODO: remove
 impl<'a> Pipeline<'a> {
     pub async fn new(
         delta_config: &'a DeltaConfig,
@@ -186,14 +186,14 @@ impl<'a> Pipeline<'a> {
     }
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // TODO: remove
 #[async_trait]
 pub trait PipelineTrait: Send + Sync {
     // Asynchronously flush the pipeline data
     async fn flush(&self) -> AppResult<()>;
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // TODO: remove
 #[async_trait]
 impl PipelineTrait for Pipeline<'_> {
     /// Flush aggregator data

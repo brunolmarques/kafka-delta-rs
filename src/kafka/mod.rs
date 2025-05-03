@@ -156,7 +156,7 @@ impl<'a> KafkaConsumer<'a> {
         })
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code)] // TODO: remove
     pub async fn run(&self) -> AppResult<()> {
         let mut stream = self.consumer.stream();
         let mut last_flush = Instant::now();
@@ -240,7 +240,7 @@ impl<'a> KafkaConsumer<'a> {
         Ok(())
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code)] // TODO: remove
     // Modified to be generic over any M: Message.
     async fn handle_message<M: Message>(&self, msg: &M) -> AppResult<()> {
         let offset = msg.offset();

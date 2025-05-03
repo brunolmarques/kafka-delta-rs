@@ -13,7 +13,7 @@ use crate::handlers::{AppError, AppResult, MonitoringError};
 // Add a static variable to store the meter provider.
 static METER_PROVIDER: OnceLock<SdkMeterProvider> = OnceLock::new();
 
-#[allow(dead_code)]
+#[allow(dead_code)] // TODO: remove
 /// A handle for the telemetry system. Store references to the meter, counters, histograms, etc.
 #[derive(Clone)]
 pub struct Monitoring {
@@ -172,7 +172,7 @@ impl Monitoring {
             .add(1, &[KeyValue::new("kafka_commits", "commits_count")]);
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code)] // TODO: remove
     /// Set offset lag gauge. This is: latest_available_offset - current_committed_offset.
     pub fn set_kafka_offset_lag(&self, lag: i64) {
         self.offset_lag_gauge
@@ -187,7 +187,7 @@ impl Monitoring {
         );
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code)] // TODO: remove
     /// Record number of messages/records written to Delta.
     pub fn record_delta_write(&self, count: u64) {
         self.delta_write_counter.add(
@@ -196,7 +196,7 @@ impl Monitoring {
         );
     }
 
-    #[allow(dead_code)] // TODO: remove all #[allow(dead_code)]
+    #[allow(dead_code)] // TODO: remove
     /// Observe flush time for writing to Delta.
     pub fn observe_delta_flush_time(&self, seconds: f64) {
         self.delta_flush_histogram.record(

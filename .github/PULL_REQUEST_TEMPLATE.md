@@ -12,10 +12,6 @@
 - [ ] Breaking change (fix or add feature that would cause existing functionality to no work as expected).
 - [ ] Support files, e.g., documentation, formatting, linting.
 
-## Checklist:
-
-- [ ] Merged main to current branch before creating the Pull Request?
-- [ ] Commented on code, particularly in hard-to-understand parts?
 
 ---
 
