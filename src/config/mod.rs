@@ -1,12 +1,12 @@
+#[allow(dead_code)]
 // Responsible for parsing a YAML configuration file and merging with CLI arguments
 // Dependencies: serde, serde_yaml, structopt/clap
-
 use serde::Deserialize;
 use std::path::Path;
 
 use crate::handlers::{AppResult, ConfigError};
-use crate::model::{DeltaWriteMode, FieldConfig, FieldType};
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct AppConfig {
     pub kafka: KafkaConfig,
@@ -27,11 +27,34 @@ pub struct KafkaConfig {
     pub timeout: Option<u64>, // Optional: timeout for Kafka operations, default is 5000ms
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct DeltaConfig {
+    /// Path to the Delta table
     pub table_path: String,
-    pub mode: DeltaWriteMode, // Supported modes: "UPSERT" or "INSERT"
-    pub schema: Option<Vec<FieldConfig>>,
+    /// Write mode for Delta table. Supported modes: "UPSERT" or "INSERT"
+    pub mode: DeltaWriteMode,
+    /// Message format (JSON or gRPC)
+    pub message_format: MessageFormat,
+    /// Buffer size for batching messages before writing to Delta
+    pub buffer_size: Option<usize>,
+}
+
+/// Message format for parsing Kafka messages
+#[derive(Debug, Deserialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageFormat {
+    /// JSON format
+    Json,
+    /// gRPC format
+    Grpc,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy)]
+#[serde(rename_all = "PascalCase")]
+pub enum DeltaWriteMode {
+    Insert,
+    Upsert,
 }
 
 #[derive(Debug, Deserialize)]
@@ -50,8 +73,10 @@ pub struct MonitoringConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct ConcurrencyConfig {
+    #[allow(dead_code)]
     pub thread_pool_size: Option<usize>, // None means unlimited
-    pub retry_attempts: Option<usize>,   // None means no retries
+    #[allow(dead_code)]
+    pub retry_attempts: Option<usize>, // None means no retries
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,6 +85,7 @@ pub struct PipelineConfig {
     pub max_wait_secs: Option<u64>, // Optional max wait time threshold between each batch processing
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct CredentialsConfig {
     pub kafka_username: String,
@@ -137,21 +163,10 @@ impl AppConfig {
             );
         }
 
-        if config.delta.schema.is_none() {
-            log::warn!("Warning: delta.schema is not set. All columns will be parsed as strings.");
-        }
-
-        // If a schema is present, check each field
-        if let Some(ref fields) = config.delta.schema {
-            for f in fields {
-                f.validate()?;
-            }
-        }
-
         // Validate the table path and store the parsed path
         let parsed_path = deltalake::Path::parse(&config.delta.table_path).map_err(|e| {
-            log::error!("Invalid Delta table path: {}", e);
-            ConfigError::InvalidField(format!("Invalid Delta table path: {}", e))
+            log::error!("Invalid Delta table path: {e}");
+            ConfigError::InvalidField(format!("Invalid Delta table path: {e}"))
         })?;
 
         // Store the validated path back in the config
@@ -167,7 +182,6 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::FieldType;
     use std::fs;
     use std::path::PathBuf;
 
@@ -181,12 +195,9 @@ kafka:
   timeout: 5000
 delta:
   table_path: "/data/delta/table"
-  mode: INSERT
-  schema:
-    - field: "id"
-      type: "u64"
-    - field: "name"
-      type: "string"
+  mode: Insert
+  message_format: json
+  buffer_size: 10
 logging:
   level: "INFO"
 monitoring:
@@ -211,7 +222,7 @@ credentials:
     fn load_config_from_str(yaml: &str) -> AppResult<AppConfig> {
         let random_number: u64 = rand::random();
         let tmp_path: PathBuf =
-            std::env::temp_dir().join(format!("temp_config_{}.yaml", random_number));
+            std::env::temp_dir().join(format!("temp_config_{random_number}.yaml"));
         fs::write(&tmp_path, yaml).unwrap();
         let config = AppConfig::load_config(&tmp_path);
         fs::remove_file(&tmp_path).unwrap_or(());
@@ -223,17 +234,6 @@ credentials:
         let yaml = dummy_yaml_config();
         let config: AppConfig = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(config.kafka.broker, "localhost:9092");
-
-        // Check schema fields
-        if let Some(schema) = &config.delta.schema {
-            assert_eq!(schema.len(), 2);
-            assert_eq!(schema[0].field, "id");
-            assert_eq!(schema[0].type_name, FieldType::U64);
-            assert_eq!(schema[1].field, "name");
-            assert_eq!(schema[1].type_name, FieldType::String);
-        } else {
-            panic!("Schema should be present");
-        }
     }
 
     #[test]

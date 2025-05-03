@@ -4,6 +4,7 @@
 // and Delta table writing in a multi-threaded fashion (using Tokio for async and Rayon for parallel tasks).
 
 mod config;
+mod delta;
 mod handlers;
 mod kafka;
 mod logging;
@@ -12,13 +13,12 @@ mod monitoring;
 mod pipeline;
 mod utils;
 
-use handlers::DeltaError;
 use std::env;
-use std::sync::{Arc, Mutex};
-use tokio::main;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 use crate::config::AppConfig;
-use crate::handlers::{AppError, AppResult};
+use crate::handlers::AppError;
 use crate::kafka::KafkaConsumer;
 use crate::logging::init_logging;
 use crate::monitoring::Monitoring;
@@ -27,7 +27,7 @@ use crate::pipeline::Pipeline;
 #[tokio::main]
 async fn main() {
     if let Err(e) = run().await {
-        eprintln!("Application error: {:?}", e);
+        eprintln!("Application error: {e:?}");
         std::process::exit(1);
     }
 }
@@ -49,7 +49,7 @@ async fn run() -> Result<(), AppError> {
     ));
 
     // 4) Initialize Kafka consumer
-    let consumer = KafkaConsumer::new(&app_config, pipeline, Some(&monitoring))?;
+    let _consumer = KafkaConsumer::new(&app_config, pipeline, Some(&monitoring))?;
 
     // TODO: finish implementing the run method
 

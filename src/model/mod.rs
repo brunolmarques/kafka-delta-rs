@@ -1,10 +1,5 @@
-use chrono::{DateTime, Utc};
-use serde::Deserialize;
 use std::collections::HashMap;
-use std::fmt::Display;
 use std::hash::{Hash, Hasher};
-
-use crate::handlers::{AppResult, ConfigError};
 
 //--------------------------------- Kafka Message -------------------------------------
 
@@ -40,83 +35,18 @@ impl Hash for MessageRecordTyped {
 
 //--------------------------------- Delta Schema -------------------------------------
 
-#[derive(Deserialize, Debug, Clone, Copy)]
-#[serde(rename_all = "UPPERCASE")]
-pub enum DeltaWriteMode {
-    INSERT,
-    UPSERT,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct FieldConfig {
-    pub field: String,
-    #[serde(rename = "type")]
-    pub type_name: FieldType,
-}
-
-impl FieldConfig {
-    pub fn validate(&self) -> AppResult<()> {
-        // Currently, the enum's derive(Deserialize) will fail on unknown variants, so no big checks needed
-        // But it is possible to do any custom validations here, e.g. forbid certain field names, etc.
-        if self.field.is_empty() {
-            log::error!("Invalid field config: field is empty");
-            return Err(ConfigError::InvalidField("FieldConfig.field is empty".to_string()).into());
-        }
-
-        Ok(())
-    }
-}
-
-/// Enum restricting the possible field types
-#[derive(Debug, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum FieldType {
-    Null,
-    U64,
-    I64,
-    F64,
-    Bool,
-    String,
-    DateTime,
-    Array {
-        #[serde(rename = "item_type")]
-        item_type: Box<FieldType>,
-    },
-    HashMap {
-        #[serde(rename = "key_type")]
-        key_type: Box<KeyFieldType>,
-        #[serde(rename = "value_type")]
-        value_type: Box<FieldType>,
-    },
-}
-
-impl Display for FieldType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-/// Field types that are allowed to be used as keys in HashMaps
-#[derive(Debug, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "lowercase")]
-pub enum KeyFieldType {
-    U64,
-    I64,
-    Bool,
-    String,
-    DateTime,
-}
-
+#[allow(dead_code)]
 /// An enum to hold typed field values
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypedValue {
     Null,
     U64(u64),
-    I64(i64),
-    F64(f64), // not hashable!
-    Bool(bool),
-    String(String),
-    DateTime(DateTime<Utc>),
+    Int64(i64),
+    Float64(f64), // not hashable!
+    Boolean(bool),
+    Utf8(String),
+    Date(i32),
+    Timestamp(i64),
     Array(Vec<TypedValue>),
     Object(HashMap<KeyValue, TypedValue>),
 }
@@ -124,8 +54,26 @@ pub enum TypedValue {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum KeyValue {
     U64(u64),
-    I64(i64),
-    Bool(bool),
-    String(String),
-    DateTime(DateTime<Utc>),
+    Int64(i64),
+    Boolean(bool),
+    Utf8(String),
+    Date(i32),
+    Timestamp(i64),
+}
+
+impl From<TypedValue> for KeyValue {
+    fn from(value: TypedValue) -> Self {
+        match value {
+            TypedValue::U64(u) => KeyValue::U64(u),
+            TypedValue::Int64(i) => KeyValue::Int64(i),
+            TypedValue::Boolean(b) => KeyValue::Boolean(b),
+            TypedValue::Utf8(s) => KeyValue::Utf8(s),
+            TypedValue::Date(d) => KeyValue::Date(d),
+            TypedValue::Timestamp(t) => KeyValue::Timestamp(t),
+            _ => {
+                log::error!("Unsupported TypedValue type: {value:?}");
+                panic!("Unsupported TypedValue type: {value:?}");
+            }
+        }
+    }
 }

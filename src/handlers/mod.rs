@@ -1,3 +1,6 @@
+#[allow(dead_code)]
+use arrow::datatypes::DataType;
+use serde_json::Value;
 // Custom error definitions for the application.
 use thiserror::Error;
 
@@ -22,9 +25,6 @@ pub enum KafkaError {
 
     #[error("Kafka communication lost: {0}")]
     CommunicationLost(String),
-
-    #[error("Kafka timeout occurred: {0}")]
-    Timeout(String),
 }
 
 /// Errors related to the data pipeline/aggregator
@@ -35,9 +35,27 @@ pub enum PipelineError {
 
     #[error("Failed to flush aggregator: {0}")]
     FlushError(String),
+}
 
-    #[error("Failed to parse message to Delta schema: {0}")]
-    ParseError(String),
+#[derive(Debug, Error, PartialEq)]
+pub enum ParseError {
+    #[error("missing required column `{0}`")]
+    MissingField(String),
+
+    #[error("type mismatch for `{0}` - expected {1:?}, got {2}")]
+    TypeMismatch(String, DataType, Value),
+
+    #[error("bad timestamp `{0}`: {1}")]
+    BadTimestamp(String, #[source] chrono::ParseError),
+
+    #[error("bad date `{0}`: {1}")]
+    BadDate(String, #[source] chrono::ParseError),
+
+    #[error("bad object `{0}`: {1}")]
+    BadJsonObject(String, Value),
+
+    #[error("Arrow batch error: {0}")]
+    ArrowBatchError(String),
 }
 
 /// Errors related to writing or reading data from Delta
@@ -55,9 +73,6 @@ pub enum DeltaError {
 pub enum MonitoringError {
     #[error("Telemetry endpoint error: {0}")]
     ExporterError(String),
-
-    #[error("Telemetry shutdown error: {0}")]
-    ShutdownError(String),
 }
 
 /// A top-level application error enum combining sub-errors
@@ -78,6 +93,8 @@ pub enum AppError {
     #[error("Telemetry error: {0}")]
     Monitoring(#[from] MonitoringError),
 
+    #[error("Parse error: {0}")]
+    Parse(#[from] ParseError),
 }
 
 /// A specialized result type for our application

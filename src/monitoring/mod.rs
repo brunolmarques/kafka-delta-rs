@@ -1,5 +1,4 @@
 // Monitoring and instrumentation
-
 use opentelemetry::metrics::{Counter, Histogram, Meter, UpDownCounter};
 use opentelemetry::{KeyValue, global};
 use opentelemetry_otlp::MetricExporter;
@@ -14,6 +13,7 @@ use crate::handlers::{AppError, AppResult, MonitoringError};
 // Add a static variable to store the meter provider.
 static METER_PROVIDER: OnceLock<SdkMeterProvider> = OnceLock::new();
 
+#[allow(dead_code)]
 /// A handle for the telemetry system. Store references to the meter, counters, histograms, etc.
 #[derive(Clone)]
 pub struct Monitoring {
@@ -55,10 +55,9 @@ impl Monitoring {
             .with_endpoint(config.endpoint.clone())
             .build()
             .map_err(|e| {
-                log::error!("Failed to create metric exporter: {}", e);
+                log::error!("Failed to create metric exporter: {e}");
                 AppError::Monitoring(MonitoringError::ExporterError(format!(
-                    "Failed to create metric exporter: {}",
-                    e
+                    "Failed to create metric exporter: {e}"
                 )))
             })?;
 
@@ -153,18 +152,18 @@ impl Monitoring {
 
     /// Record number of messages read.
     pub fn record_kafka_messages_read(&self, count: u64) {
-        self.messages_read_counter.add(count, &[KeyValue::new(
-            "kafka_messages_read",
-            "messages_count",
-        )]);
+        self.messages_read_counter.add(
+            count,
+            &[KeyValue::new("kafka_messages_read", "messages_count")],
+        );
     }
 
     /// Record total size of messages read from Kafka.
     pub fn record_kafka_messages_size(&self, size_bytes: u64) {
-        self.message_size_counter.add(size_bytes, &[KeyValue::new(
-            "kafka_messages_size",
-            "messages_size_bytes",
-        )]);
+        self.message_size_counter.add(
+            size_bytes,
+            &[KeyValue::new("kafka_messages_size", "messages_size_bytes")],
+        );
     }
 
     /// Record a Kafka commit event.
@@ -173,6 +172,7 @@ impl Monitoring {
             .add(1, &[KeyValue::new("kafka_commits", "commits_count")]);
     }
 
+    #[allow(dead_code)]
     /// Set offset lag gauge. This is: latest_available_offset - current_committed_offset.
     pub fn set_kafka_offset_lag(&self, lag: i64) {
         self.offset_lag_gauge
@@ -181,26 +181,31 @@ impl Monitoring {
 
     /// Record number of messages sent to dead letter topic.
     pub fn record_dead_letters(&self, count: u64) {
-        self.dead_letters_counter.add(count, &[KeyValue::new(
-            "kafka_dead_letters",
-            "dead_letters_count",
-        )]);
+        self.dead_letters_counter.add(
+            count,
+            &[KeyValue::new("kafka_dead_letters", "dead_letters_count")],
+        );
     }
 
+    #[allow(dead_code)]
     /// Record number of messages/records written to Delta.
     pub fn record_delta_write(&self, count: u64) {
-        self.delta_write_counter.add(count, &[KeyValue::new(
-            "delta_messages_written",
-            "messages_count",
-        )]);
+        self.delta_write_counter.add(
+            count,
+            &[KeyValue::new("delta_messages_written", "messages_count")],
+        );
     }
 
+    #[allow(dead_code)] // TODO: remove all #[allow(dead_code)]
     /// Observe flush time for writing to Delta.
     pub fn observe_delta_flush_time(&self, seconds: f64) {
-        self.delta_flush_histogram.record(seconds, &[KeyValue::new(
-            "delta_flush_time_seconds",
-            "flush_time_seconds",
-        )]);
+        self.delta_flush_histogram.record(
+            seconds,
+            &[KeyValue::new(
+                "delta_flush_time_seconds",
+                "flush_time_seconds",
+            )],
+        );
     }
 }
 
@@ -209,7 +214,6 @@ impl Monitoring {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opentelemetry::global;
 
     // Define a helper to create a no-op config.
     fn dummy_no_op_config() -> crate::config::MonitoringConfig {

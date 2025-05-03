@@ -1,26 +1,23 @@
 // This module consolidates data from multiple Kafka sources,
 // deduplicates them in parallel, and prepares atomic daily batches.
 // It also implements recovery if a crash occurs (e.g., by reading checkpoints).
-use arrow::array::{Array, ArrayAccessor, PrimitiveArray};
-use arrow::datatypes::{DataType, Int32Type, Int64Type};
 use async_trait::async_trait;
-use deltalake::kernel::{Schema, StructType};
+use deltalake::kernel::StructType;
 use deltalake::parquet::basic::{Compression, ZstdLevel};
 use deltalake::parquet::file::properties::WriterProperties;
-use deltalake::writer::{DeltaWriter, RecordBatchWriter, WriteMode};
+use deltalake::writer::WriteMode;
 use deltalake::*;
 use std::collections::HashMap;
 use std::collections::{BTreeMap, HashSet};
-use std::sync::{Arc, Mutex};
-use tokio::sync::Mutex as TokioMutex;
-use tokio::task;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
-use crate::config::DeltaConfig;
-use crate::handlers::PipelineError::FlushError;
+use crate::config::{DeltaConfig, DeltaWriteMode};
+use crate::delta::{DeltaIo, DeltaWriterIo};
 use crate::handlers::{AppError, AppResult, DeltaError, PipelineError};
-use crate::model::{DeltaWriteMode, MessageRecordTyped, TypedValue};
+use crate::model::{MessageRecordTyped, TypedValue};
 use crate::monitoring::Monitoring;
-use crate::utils::{build_record_batch_from_vec, parse_to_typed};
+use crate::utils::build_record_batch_from_vec;
 
 /// Buffer used for consolidating messages
 /// Example of the aggregator:
@@ -39,6 +36,7 @@ use crate::utils::{build_record_batch_from_vec, parse_to_typed};
 /// The `InMemoryAggregator` is a simple in-memory data structure
 /// that stores messages with unique offsets and keys.
 /// It uses a BTreeMap for ordered storage and HashSet for fast lookups.
+#[allow(dead_code)]
 #[derive(Debug)]
 struct InMemoryAggregator {
     records: BTreeMap<i64, HashMap<String, TypedValue>>,
@@ -47,13 +45,14 @@ struct InMemoryAggregator {
     counter: usize,
 }
 
+#[allow(dead_code)]
 impl InMemoryAggregator {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             records: BTreeMap::new(),
             seen_offsets: HashSet::new(),
             seen_keys: HashSet::new(),
-            counter: 0, // initialize counter
+            counter: 0,
         }
     }
 
@@ -65,7 +64,7 @@ impl InMemoryAggregator {
 
         if let Some(ref key) = record.key {
             if self.seen_keys.contains(key) {
-                log::warn!("Duplicate key {} - skipping insertion", key);
+                log::warn!("Duplicate key {key} - skipping insertion");
                 return Ok(());
             }
         }
@@ -96,15 +95,16 @@ impl InMemoryAggregator {
 }
 
 /// Wraps aggregator & flush logic
+#[allow(dead_code)]
 pub struct Pipeline<'a> {
-    delta_table: DeltaTable,
-    delta_schema: Arc<arrow::datatypes::Schema>,
-    aggregator: Arc<Mutex<InMemoryAggregator>>,
-    delta_config: &'a DeltaConfig,
-    writer_properties: WriterProperties,
+    delta_io: Box<dyn DeltaIo>,
+    pub delta_schema: arrow::datatypes::Schema,
+    aggregator: Arc<std::sync::Mutex<InMemoryAggregator>>,
+    pub delta_config: &'a DeltaConfig,
     monitoring: Option<&'a Monitoring>, // TODO: Implement monitoring
 }
 
+#[allow(dead_code)]
 impl<'a> Pipeline<'a> {
     pub async fn new(
         delta_config: &'a DeltaConfig,
@@ -113,10 +113,9 @@ impl<'a> Pipeline<'a> {
         let delta_table = match deltalake::open_table(&delta_config.table_path).await {
             Ok(table) => table,
             Err(e) => {
-                log::error!("Failed to open Delta table: {}", e);
+                log::error!("Failed to open Delta table: {e}");
                 return Err(AppError::Delta(DeltaError::IoError(format!(
-                    "Failed to open Delta table: {}",
-                    e
+                    "Failed to open Delta table: {e}"
                 ))));
             }
         };
@@ -125,137 +124,89 @@ impl<'a> Pipeline<'a> {
             .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
             .build();
 
-        let metadata = delta_table.metadata().map_err(|e| {
-            log::error!("Failed to get metadata for the table: {}", e);
+        let metadata = &delta_table.metadata().map_err(|e| {
+            log::error!("Failed to get metadata for the table: {e}");
             AppError::Delta(DeltaError::TableError(format!(
-                "Failed to get metadata for the table: {}",
-                e
+                "Failed to get metadata for the table: {e}"
             )))
         })?;
 
         let schema = metadata.schema().map_err(|e| {
-            log::error!("Failed to get schema: {}", e);
-            AppError::Delta(DeltaError::TableError(format!(
-                "Failed to get schema: {}",
-                e
-            )))
+            log::error!("Failed to get schema: {e}");
+            AppError::Delta(DeltaError::TableError(
+                format!("Failed to get schema: {e}",),
+            ))
         })?;
 
         let arrow_schema =
             <deltalake::arrow::datatypes::Schema as TryFrom<&StructType>>::try_from(&schema)
                 .map_err(|e| {
-                    log::error!("Failed to convert to arrow schema: {}", e);
+                    log::error!("Failed to convert to arrow schema: {e}");
                     AppError::Delta(DeltaError::TableError(format!(
-                        "Failed to convert to arrow schema: {}",
-                        e
+                        "Failed to convert to arrow schema: {e}"
                     )))
                 })?;
 
-        let arrow_schema_ref = Arc::new(arrow_schema);
+        let delta_io = Box::new(DeltaWriterIo::new(
+            Arc::new(Mutex::new(delta_table)),
+            writer_properties,
+        ));
 
         Ok(Self {
-            delta_table,
-            delta_schema: arrow_schema_ref,
-            aggregator: Arc::new(Mutex::new(InMemoryAggregator::new())),
+            delta_io,
+            delta_schema: arrow_schema,
+            aggregator: Arc::new(std::sync::Mutex::new(InMemoryAggregator::new())),
             delta_config,
-            writer_properties,
             monitoring,
         })
     }
-}
 
-#[async_trait]
-pub trait PipelineTrait: Send + Sync {
-    // Asynchronously insert a record into the pipeline
-    async fn insert_record(
+    pub fn insert_record(
         &self,
         offset: i64,
         key: Option<String>,
-        payload: String,
-    ) -> AppResult<()>;
-
-    // Asynchronously flush the pipeline data
-    async fn flush(&self) -> AppResult<()>;
-
-    // Returns the count of aggregated records
-    fn aggregator_len(&self) -> usize;
-}
-
-#[async_trait]
-impl<'a> PipelineTrait for Pipeline<'a> {
-    /// Asynchronously insert a record into aggregator
-    async fn insert_record(
-        &self,
-        offset: i64,
-        key: Option<String>,
-        payload: String,
+        payload: HashMap<String, TypedValue>,
     ) -> AppResult<()> {
-        // Parse the incoming string as JSON
-        // TODO: Send invalid messages to dead letter topic
-        let parsed_json: serde_json::Value = serde_json::from_str(&payload)
-            .map_err(|e| PipelineError::ParseError(format!("Invalid JSON: {e}")))?;
-
-        // If there is a schema in config, apply parse_to_typed
-        let typed_fields = if let Some(field_configs) = &self.delta_config.schema {
-            parse_to_typed(&parsed_json, field_configs)?
-        } else {
-            // Deal with no schema, treat all columns as strings
-            let mut typed_fields = HashMap::new();
-            for (key, value) in parsed_json.as_object().unwrap() {
-                typed_fields.insert(key.clone(), TypedValue::String(value.to_string()));
-            }
-            typed_fields
-        };
-
-        // Build the record with typed fields
         let record = MessageRecordTyped {
             offset,
             key,
-            payload: typed_fields,
+            payload,
         };
 
-        let aggregator = self.aggregator.clone();
+        let mut agg = self.aggregator.lock().map_err(|e| {
+            log::error!("Failed to acquire aggregator lock: {e}");
+            PipelineError::InsertError(format!("Failed to acquire aggregator lock: {e}"))
+        })?;
 
-        log::debug!("Inserting record: {:?}", record);
-
-        task::spawn_blocking(move || {
-            let mut agg = aggregator.lock().unwrap_or_else(|poisoned| {
-                // Mutex lock will only fail in case of poisoned lock
-                // This is a rare case, but can happen if the current lock holder panics
-                // Which can leave the aggregator in an inconsistent state
-                log::warn!("Lock poisoned, recovering inner data");
-                poisoned.into_inner()
-            });
-            agg.insert(record)
-        })
-        .await
-        .map_err(|e| {
-            PipelineError::InsertError(format!("Aggregator insertion task panicked: {e}"))
-        })??;
-
-        log::debug!("Record inserted successfully");
-
-        Ok(())
+        agg.insert(record).map_err(AppError::Pipeline)
     }
 
+    pub fn aggregator_len(&self) -> usize {
+        self.aggregator.lock().map(|agg| agg.len()).unwrap_or(0)
+    }
+}
+
+#[allow(dead_code)]
+#[async_trait]
+pub trait PipelineTrait: Send + Sync {
+    // Asynchronously flush the pipeline data
+    async fn flush(&self) -> AppResult<()>;
+}
+
+#[allow(dead_code)]
+#[async_trait]
+impl PipelineTrait for Pipeline<'_> {
     /// Flush aggregator data
     async fn flush(&self) -> AppResult<()> {
-        let aggregator = self.aggregator.clone();
-
         log::info!("Flushing aggregator data…");
 
-        let batch = task::spawn_blocking(move || {
-            let mut agg = aggregator.lock().unwrap_or_else(|poisoned| {
-                // Mutex lock will only fail in case of poisoned lock
-                // This is a rare case, but can happen if the current lock holder panics
-                // Which can leave the aggregator in an inconsistent state
-                log::warn!("Lock poisoned, recovering inner data");
-                poisoned.into_inner()
-            });
-            Ok::<_, PipelineError>(agg.drain())
-        })
-        .await
-        .map_err(|e| FlushError(format!("Drain task panicked: {e}")))??;
+        let batch = {
+            let mut agg = self.aggregator.lock().map_err(|e| {
+                log::error!("Failed to acquire aggregator lock: {e}");
+                PipelineError::FlushError(format!("Failed to acquire aggregator lock: {e}"))
+            })?;
+            agg.drain()
+        };
 
         if batch.is_empty() {
             log::info!("No messages to flush. Skipping write.");
@@ -273,53 +224,14 @@ impl<'a> PipelineTrait for Pipeline<'a> {
 
         // Determine write mode based on configuration
         let write_mode = match self.delta_config.mode {
-            DeltaWriteMode::INSERT => WriteMode::Default,
-            DeltaWriteMode::UPSERT => WriteMode::MergeSchema,
+            DeltaWriteMode::Insert => WriteMode::Default,
+            DeltaWriteMode::Upsert => WriteMode::MergeSchema,
         };
 
-        // Create a new writer for this flush operation
-        let mut writer = RecordBatchWriter::for_table(&self.delta_table)
-            .map_err(|e| {
-                log::error!("Failed to make RecordBatchWriter: {}", e);
-                AppError::Delta(DeltaError::TableError(format!(
-                    "Failed to make RecordBatchWriter: {}",
-                    e
-                )))
-            })?
-            .with_writer_properties(self.writer_properties.clone());
-
-        // Write the batch - the writer will automatically handle partitioning
-        writer
-            .write_with_mode(arrow_batch, write_mode)
-            .await
-            .map_err(|e| {
-                log::error!("Failed to write batch to Delta table: {}", e);
-                AppError::Delta(DeltaError::TableError(format!(
-                    "Failed to write batch to Delta table: {}",
-                    e
-                )))
-            })?;
-
-        // Use a separate function to handle the flush and commit
-        let adds = writer
-            .flush_and_commit(&mut self.delta_table)
-            .await
-            .map_err(|e| {
-                log::error!("Failed to flush and commit batch to Delta table: {}", e);
-                AppError::Delta(DeltaError::TableError(format!(
-                    "Failed to flush and commit batch to Delta table: {}",
-                    e
-                )))
-            })?;
-
-        log::info!("Flush completed. {} adds written", adds);
+        // Write the batch using the delta_io interface
+        self.delta_io.write_batch(arrow_batch, write_mode).await?;
 
         Ok(())
-    }
-
-    fn aggregator_len(&self) -> usize {
-        let agg = self.aggregator.lock().unwrap(); // In practice, handle PoisonError
-        agg.len()
     }
 }
 
@@ -328,144 +240,134 @@ impl<'a> PipelineTrait for Pipeline<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::DeltaWriteMode;
+    use crate::config::{DeltaConfig, DeltaWriteMode, MessageFormat};
+    use crate::delta::MockDeltaIo;
+    use crate::model::TypedValue;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use mockall::predicate;
     use std::collections::HashMap;
-    use tokio;
+    use std::sync::Arc;
 
-    // Updated helper for creating a pipeline instance for tests.
-    async fn create_pipeline() -> Pipeline<'static> {
-        let config = Box::leak(Box::new(DeltaConfig {
-            table_path: "dummy".to_string(),
-            mode: DeltaWriteMode::INSERT,
-            schema: None,
-        }));
-        Pipeline::new(config, None).await.unwrap()
+    fn create_mock_config() -> DeltaConfig {
+        DeltaConfig {
+            table_path: "test_table".to_string(),
+            mode: DeltaWriteMode::Insert,
+            message_format: MessageFormat::Json,
+            buffer_size: Some(100),
+        }
+    }
+
+    fn create_test_schema() -> Schema {
+        Schema::new(vec![
+            Field::new("id", DataType::UInt64, true),
+            Field::new("name", DataType::Utf8, true),
+        ])
+    }
+
+    fn create_test_pipeline() -> Pipeline<'static> {
+        let config = Box::leak(Box::new(create_mock_config()));
+        let schema = create_test_schema();
+        let mut mock = MockDeltaIo::new();
+        mock.expect_write_batch()
+            .with(predicate::always(), predicate::eq(WriteMode::Default))
+            .returning(|_, _| Ok(()));
+
+        Pipeline {
+            delta_io: Box::new(mock),
+            delta_schema: schema,
+            aggregator: Arc::new(std::sync::Mutex::new(InMemoryAggregator::new())),
+            delta_config: config,
+            monitoring: None,
+        }
     }
 
     #[tokio::test]
-    async fn test_insert_record_unique() {
-        let pipeline = create_pipeline().await;
-        let payload = r#"{"dummy": "payload1"}"#.to_string(); // changed to valid JSON
-        let res = pipeline
-            .insert_record(1, Some("a".to_string()), payload)
-            .await;
-        assert!(res.is_ok());
+    async fn test_pipeline_initialization() {
+        let pipeline = create_test_pipeline();
+        assert_eq!(pipeline.aggregator_len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_insert_record() {
+        let pipeline = create_test_pipeline();
+        let mut data = HashMap::new();
+        data.insert("id".to_string(), TypedValue::U64(1));
+        data.insert("name".to_string(), TypedValue::Utf8("test".to_string()));
+
+        let result = pipeline.insert_record(1, Some("key1".to_string()), data);
+        assert!(result.is_ok());
         assert_eq!(pipeline.aggregator_len(), 1);
     }
 
     #[tokio::test]
     async fn test_insert_record_duplicate_offset() {
-        let pipeline = create_pipeline().await;
-        let payload1 = r#"{"dummy": "payload1"}"#.to_string();
-        let payload2 = r#"{"dummy": "payload2"}"#.to_string();
-        assert!(
-            pipeline
-                .insert_record(1, Some("a".to_string()), payload1)
-                .await
-                .is_ok()
-        );
-        let res = pipeline
-            .insert_record(1, Some("b".to_string()), payload2)
-            .await;
-        assert!(res.is_ok());
+        let pipeline = create_test_pipeline();
+        let mut data1 = HashMap::new();
+        data1.insert("id".to_string(), TypedValue::U64(1));
+        data1.insert("name".to_string(), TypedValue::Utf8("test1".to_string()));
+
+        let mut data2 = HashMap::new();
+        data2.insert("id".to_string(), TypedValue::U64(2));
+        data2.insert("name".to_string(), TypedValue::Utf8("test2".to_string()));
+
+        let result1 = pipeline.insert_record(1, Some("key1".to_string()), data1);
+        assert!(result1.is_ok());
+
+        let result2 = pipeline.insert_record(1, Some("key2".to_string()), data2);
+        assert!(result2.is_ok());
+
+        assert_eq!(pipeline.aggregator_len(), 1);
     }
 
     #[tokio::test]
     async fn test_insert_record_duplicate_key() {
-        let pipeline = create_pipeline().await;
-        let payload1 = r#"{"dummy": "payload1"}"#.to_string();
-        let payload2 = r#"{"dummy": "payload2"}"#.to_string();
-        assert!(
-            pipeline
-                .insert_record(1, Some("a".to_string()), payload1)
-                .await
-                .is_ok()
-        );
-        let res = pipeline
-            .insert_record(2, Some("a".to_string()), payload2)
-            .await;
-        assert!(res.is_ok());
+        let pipeline = create_test_pipeline();
+        let mut data1 = HashMap::new();
+        data1.insert("id".to_string(), TypedValue::U64(1));
+        data1.insert("name".to_string(), TypedValue::Utf8("test1".to_string()));
+
+        let mut data2 = HashMap::new();
+        data2.insert("id".to_string(), TypedValue::U64(2));
+        data2.insert("name".to_string(), TypedValue::Utf8("test2".to_string()));
+
+        let result1 = pipeline.insert_record(1, Some("key1".to_string()), data1);
+        assert!(result1.is_ok());
+
+        let result2 = pipeline.insert_record(2, Some("key1".to_string()), data2);
+        assert!(result2.is_ok());
+
+        assert_eq!(pipeline.aggregator_len(), 1);
     }
 
-    // Renamed test to fix typo.
     #[tokio::test]
-    async fn test_flush_empty_the_aggregator() {
-        let mut pipeline = create_pipeline().await;
-        let payload1 = r#"{"dummy": "payload1"}"#.to_string();
-        let payload2 = r#"{"dummy": "payload2"}"#.to_string();
-        pipeline
-            .insert_record(1, Some("a".to_string()), payload1)
-            .await
-            .unwrap();
-        pipeline
-            .insert_record(2, Some("b".to_string()), payload2)
-            .await
-            .unwrap();
-        assert_eq!(pipeline.aggregator_len(), 2);
+    async fn test_flush() {
+        let pipeline = create_test_pipeline();
+        let mut data = HashMap::new();
+        data.insert("id".to_string(), TypedValue::U64(1));
+        data.insert("name".to_string(), TypedValue::Utf8("test".to_string()));
 
-        assert!(pipeline.flush().await.is_ok());
+        let result = pipeline.insert_record(1, Some("key1".to_string()), data);
+        assert!(result.is_ok());
+        assert_eq!(pipeline.aggregator_len(), 1);
+
+        let flush_result = pipeline.flush().await;
+        assert!(flush_result.is_ok());
         assert_eq!(pipeline.aggregator_len(), 0);
     }
 
-    #[test]
-    fn test_inmemory_aggregator_insert_and_len() {
-        let mut aggregator = InMemoryAggregator::new();
-        let mut payload = HashMap::new();
-        payload.insert(
-            "dummy".to_string(),
-            TypedValue::String("payload".to_string()),
-        );
-        let record = MessageRecordTyped {
-            offset: 1,
-            key: Some("a".to_string()),
-            payload, // using hashmap payload
-        };
-        assert!(aggregator.insert(record).is_ok());
-        assert_eq!(aggregator.len(), 1);
+    #[tokio::test]
+    async fn test_flush_with_nulls() {
+        let pipeline = create_test_pipeline();
+        let mut data = HashMap::new();
+        data.insert("id".to_string(), TypedValue::Null);
+        data.insert("name".to_string(), TypedValue::Utf8("test".to_string()));
 
-        // Test duplicate offset insertion
-        let mut payload_dup = HashMap::new();
-        payload_dup.insert(
-            "dummy".to_string(),
-            TypedValue::String("payload2".to_string()),
-        );
-        let dup_offset = MessageRecordTyped {
-            offset: 1,
-            key: Some("b".to_string()),
-            payload: payload_dup,
-        };
-        assert!(aggregator.insert(dup_offset).is_ok());
-    }
+        let result = pipeline.insert_record(1, Some("key1".to_string()), data);
+        assert!(result.is_ok());
+        assert_eq!(pipeline.aggregator_len(), 1);
 
-    #[test]
-    fn test_inmemory_aggregator_drain() {
-        let mut aggregator = InMemoryAggregator::new();
-        let mut payload1 = HashMap::new();
-        payload1.insert(
-            "dummy".to_string(),
-            TypedValue::String("payload1".to_string()),
-        );
-        let mut payload2 = HashMap::new();
-        payload2.insert(
-            "dummy".to_string(),
-            TypedValue::String("payload2".to_string()),
-        );
-        let record1 = MessageRecordTyped {
-            offset: 1,
-            key: Some("a".to_string()),
-            payload: payload1,
-        };
-        let record2 = MessageRecordTyped {
-            offset: 2,
-            key: Some("b".to_string()),
-            payload: payload2,
-        };
-        aggregator.insert(record1).unwrap();
-        aggregator.insert(record2).unwrap();
-        assert_eq!(aggregator.len(), 2);
-
-        let drained = aggregator.drain();
-        assert_eq!(drained.len(), 2);
-        assert_eq!(aggregator.len(), 0);
+        let flush_result = pipeline.flush().await;
+        assert!(flush_result.is_ok());
+        assert_eq!(pipeline.aggregator_len(), 0);
     }
 }

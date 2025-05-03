@@ -1,6 +1,4 @@
 use crate::config::LoggingConfig;
-use env_logger;
-use log;
 use std::str::FromStr; // Import LoggingConfig from config
 
 // Centralizes logging functionality using the log crate and possibly env_logger.

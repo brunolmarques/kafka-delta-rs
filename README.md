@@ -281,3 +281,5 @@ This project is licensed under the [MIT License](./LICENSE).
 ---
 
 **Thank you for using Kafka-Delta-Rust!** If you have any questions, feel free to open an issue or submit a pull request. I aim to create a robust, extensible pipeline for near-real-time data processing from Kafka to Delta Lake in Rust.
+
+TODO: Add explanation about delta table schema evolution.
