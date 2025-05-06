@@ -1,5 +1,5 @@
 {
-    "name": "cursor-ai‑rust",
+    "name": "kafka-delta-rs",
     "build": {
       "dockerfile": "Dockerfile"
     },
@@ -14,7 +14,10 @@
         },
         "extensions": [
           "rust-lang.rust-analyzer",
-          "serayuzgur.crates"
+          "serayuzgur.crates",
+          // publisher.extensionId from the Marketplace
+          "ms-azuretools.vscode-docker",   // Docker extension
+          "gruntfuggly.todo-tree"          // TODO Tree extension
         ]
       }
     }

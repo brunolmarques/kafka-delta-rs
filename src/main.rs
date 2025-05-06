@@ -49,12 +49,12 @@ async fn run() -> Result<(), AppError> {
     ));
 
     // 4) Initialize Kafka consumer
-    let _consumer = KafkaConsumer::new(&app_config, pipeline, Some(&monitoring))?;
+    let consumer = KafkaConsumer::new(&app_config, pipeline, Some(&monitoring))?;
 
-    // TODO: finish implementing the run method
-
-    // The application may log successes, update Prometheus metrics, and schedule daily operations.
-    println!("Operation completed successfully.");
-
+    // 5) Run the Kafka consumer
+    log::info!("Starting Kafka consumer...");
+    // The application will keep running until an error occurs or it's interrupted
+    consumer.run().await?;
+    
     Ok(())
 }
