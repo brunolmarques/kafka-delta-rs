@@ -1,4 +1,3 @@
-#[allow(dead_code)]
 // Responsible for parsing a YAML configuration file and merging with CLI arguments
 // Dependencies: serde, serde_yaml, structopt/clap
 use serde::Deserialize;
@@ -6,7 +5,7 @@ use std::path::Path;
 
 use crate::handlers::{AppResult, ConfigError};
 
-#[allow(dead_code)]
+#[allow(dead_code)] // TODO: remove
 #[derive(Debug, Deserialize)]
 pub struct AppConfig {
     pub kafka: KafkaConfig,
@@ -27,7 +26,7 @@ pub struct KafkaConfig {
     pub timeout: Option<u64>, // Optional: timeout for Kafka operations, default is 5000ms
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // TODO: remove
 #[derive(Debug, Deserialize)]
 pub struct DeltaConfig {
     /// Path to the Delta table
@@ -73,9 +72,9 @@ pub struct MonitoringConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct ConcurrencyConfig {
-    #[allow(dead_code)]
+    #[allow(dead_code)] // TODO: remove
     pub thread_pool_size: Option<usize>, // None means unlimited
-    #[allow(dead_code)]
+    #[allow(dead_code)] // TODO: remove
     pub retry_attempts: Option<usize>, // None means no retries
 }
 
@@ -85,7 +84,7 @@ pub struct PipelineConfig {
     pub max_wait_secs: Option<u64>, // Optional max wait time threshold between each batch processing
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // TODO: remove
 #[derive(Debug, Deserialize)]
 pub struct CredentialsConfig {
     pub kafka_username: String,

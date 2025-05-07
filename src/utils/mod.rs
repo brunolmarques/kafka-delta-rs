@@ -1,4 +1,3 @@
-#[allow(dead_code)]
 use arrow::array::{
     ArrayBuilder, ArrayRef, BooleanBuilder, Float64Builder, Int32Builder, Int64Builder,
     ListBuilder, MapBuilder, NullBuilder, StringBuilder, TimestampMicrosecondBuilder,
@@ -42,7 +41,6 @@ macro_rules! append_to_builder {
 
 //------------------------------- Type Parsing -------------------------------------
 
-#[allow(dead_code)]
 /// Parse a single JSON Value into a TypedValue, given an Arrow DataType.
 fn json_to_typed(value: &Value, dt: &DataType) -> AppResult<TypedValue> {
     use TypedValue::*;

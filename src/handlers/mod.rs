@@ -1,4 +1,3 @@
-#[allow(dead_code)]
 use arrow::datatypes::DataType;
 use serde_json::Value;
 // Custom error definitions for the application.

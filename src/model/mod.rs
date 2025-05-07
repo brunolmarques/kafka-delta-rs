@@ -35,7 +35,7 @@ impl Hash for MessageRecordTyped {
 
 //--------------------------------- Delta Schema -------------------------------------
 
-#[allow(dead_code)]
+#[allow(dead_code)] // TODO: remove
 /// An enum to hold typed field values
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypedValue {
