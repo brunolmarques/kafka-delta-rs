@@ -15,9 +15,6 @@
         "extensions": [
           "rust-lang.rust-analyzer",
           "serayuzgur.crates",
-          // publisher.extensionId from the Marketplace
-          "ms-azuretools.vscode-docker",   // Docker extension
-          "gruntfuggly.todo-tree"          // TODO Tree extension
         ]
       }
     }

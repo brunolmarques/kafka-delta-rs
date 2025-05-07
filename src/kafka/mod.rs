@@ -156,7 +156,6 @@ impl<'a> KafkaConsumer<'a> {
         })
     }
 
-    #[allow(dead_code)] // TODO: remove
     pub async fn run(&self) -> AppResult<()> {
         let mut stream = self.consumer.stream();
         let mut last_flush = Instant::now();
@@ -165,6 +164,8 @@ impl<'a> KafkaConsumer<'a> {
             match msg_result {
                 Ok(borrowed_msg) => {
                     let size = &borrowed_msg.payload().map(|p| p.len() as u64).unwrap_or(0);
+                    let current_topic = borrowed_msg.topic().to_string();
+                    let current_partition = borrowed_msg.partition();
                     self.handle_message(&borrowed_msg).await?;
                     if let Some(monitoring) = self.monitoring {
                         monitoring.record_kafka_messages_read(1);
@@ -177,6 +178,57 @@ impl<'a> KafkaConsumer<'a> {
                         borrowed_msg.partition(),
                         borrowed_msg.offset()
                     );
+
+                    let should_flush_by_size =
+                        self.pipeline.lock().await.aggregator_len() >= self.max_buffer_size;
+                    let should_flush_by_time =
+                        last_flush.elapsed() >= Duration::from_secs(self.max_wait_secs);
+
+                    if should_flush_by_size || should_flush_by_time {
+                        // Flush the aggregator and, if successful, commit the consumer state.
+                        self.pipeline.lock().await.flush().await?;
+
+                        let mut attempts = 0;
+                        let max_attempts = 3;
+
+                        loop {
+                            match self.consumer.commit_consumer_state(CommitMode::Async) {
+                                Ok(_) => {
+                                    if let Some(monitoring) = self.monitoring {
+                                        monitoring.record_kafka_commit();
+                                        // Get the latest watermark for the current topic and partition
+                                        if let Ok((_, latest_offset)) =
+                                            self.consumer.fetch_watermarks(
+                                                &current_topic,
+                                                current_partition,
+                                                Duration::from_secs(5),
+                                            )
+                                        {
+                                            monitoring.set_kafka_offset_lag(latest_offset);
+                                        };
+                                    }
+                                    log::info!("Successfully committed consumer state.");
+                                    break;
+                                }
+                                Err(e) => {
+                                    attempts += 1;
+                                    log::error!("Attempt {attempts}: Commit failed: {e:?}");
+                                    if attempts >= max_attempts {
+                                        log::error!("Max attempts reached. Giving up.");
+                                        return Err(AppError::Kafka(
+                                            KafkaError::CommunicationLost(format!(
+                                                "Commit failed after {attempts} attempts: {e:?}"
+                                            )),
+                                        ));
+                                    }
+                                    // Delay before retrying
+                                    tokio::time::sleep(Duration::from_secs(5)).await;
+                                }
+                            }
+                        }
+                        log::info!("Flushed and committed successfully.");
+                        last_flush = Instant::now();
+                    }
                 }
                 Err(e) => {
                     log::error!("Kafka read error: {e:?}");
@@ -185,46 +237,6 @@ impl<'a> KafkaConsumer<'a> {
                         "Kafka read error: {e:?}"
                     ))));
                 }
-            }
-
-            let should_flush_by_size =
-                self.pipeline.lock().await.aggregator_len() >= self.max_buffer_size;
-            let should_flush_by_time =
-                last_flush.elapsed() >= Duration::from_secs(self.max_wait_secs);
-
-            if should_flush_by_size || should_flush_by_time {
-                // Flush the aggregator and, if successful, commit the consumer state.
-                // This guarantees idempotency in case of failure.
-                self.pipeline.lock().await.flush().await?;
-
-                let mut attempts = 0;
-                let max_attempts = 3;
-
-                loop {
-                    match self.consumer.commit_consumer_state(CommitMode::Async) {
-                        Ok(_) => {
-                            if let Some(monitoring) = self.monitoring {
-                                monitoring.record_kafka_commit();
-                            }
-                            log::info!("Successfully committed consumer state.");
-                            break;
-                        }
-                        Err(e) => {
-                            attempts += 1;
-                            log::error!("Attempt {attempts}: Commit failed: {e:?}");
-                            if attempts >= max_attempts {
-                                log::error!("Max attempts reached. Giving up.");
-                                return Err(AppError::Kafka(KafkaError::CommunicationLost(
-                                    format!("Commit failed after {attempts} attempts: {e:?}"),
-                                )));
-                            }
-                            // Delay before retrying
-                            tokio::time::sleep(Duration::from_secs(5)).await;
-                        }
-                    }
-                }
-                log::info!("Flushed and committed successfully.");
-                last_flush = Instant::now();
             }
         }
 
@@ -240,7 +252,6 @@ impl<'a> KafkaConsumer<'a> {
         Ok(())
     }
 
-    #[allow(dead_code)] // TODO: remove
     // Modified to be generic over any M: Message.
     async fn handle_message<M: Message>(&self, msg: &M) -> AppResult<()> {
         let offset = msg.offset();

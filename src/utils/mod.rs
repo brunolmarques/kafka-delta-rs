@@ -41,7 +41,6 @@ macro_rules! append_to_builder {
 
 //------------------------------- Type Parsing -------------------------------------
 
-#[allow(dead_code)] // TODO: remove
 /// Parse a single JSON Value into a TypedValue, given an Arrow DataType.
 fn json_to_typed(value: &Value, dt: &DataType) -> AppResult<TypedValue> {
     use TypedValue::*;

@@ -10,6 +10,7 @@ use deltalake::*;
 use std::collections::HashMap;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::Mutex;
 
 use crate::config::{DeltaConfig, DeltaWriteMode};
@@ -36,7 +37,6 @@ use crate::utils::build_record_batch_from_vec;
 /// The `InMemoryAggregator` is a simple in-memory data structure
 /// that stores messages with unique offsets and keys.
 /// It uses a BTreeMap for ordered storage and HashSet for fast lookups.
-#[allow(dead_code)] // TODO: remove
 #[derive(Debug)]
 struct InMemoryAggregator {
     records: BTreeMap<i64, HashMap<String, TypedValue>>,
@@ -45,7 +45,6 @@ struct InMemoryAggregator {
     counter: usize,
 }
 
-#[allow(dead_code)] // TODO: remove
 impl InMemoryAggregator {
     pub fn new() -> Self {
         Self {
@@ -95,16 +94,14 @@ impl InMemoryAggregator {
 }
 
 /// Wraps aggregator & flush logic
-#[allow(dead_code)]  // TODO: remove
 pub struct Pipeline<'a> {
     delta_io: Box<dyn DeltaIo>,
     pub delta_schema: arrow::datatypes::Schema,
     aggregator: Arc<std::sync::Mutex<InMemoryAggregator>>,
     pub delta_config: &'a DeltaConfig,
-    monitoring: Option<&'a Monitoring>, // TODO: Implement monitoring
+    monitoring: Option<&'a Monitoring>,
 }
 
-#[allow(dead_code)] // TODO: remove
 impl<'a> Pipeline<'a> {
     pub async fn new(
         delta_config: &'a DeltaConfig,
@@ -186,19 +183,20 @@ impl<'a> Pipeline<'a> {
     }
 }
 
-#[allow(dead_code)] // TODO: remove
 #[async_trait]
 pub trait PipelineTrait: Send + Sync {
     // Asynchronously flush the pipeline data
     async fn flush(&self) -> AppResult<()>;
 }
 
-#[allow(dead_code)] // TODO: remove
 #[async_trait]
 impl PipelineTrait for Pipeline<'_> {
     /// Flush aggregator data
     async fn flush(&self) -> AppResult<()> {
         log::info!("Flushing aggregator data…");
+
+        // Record flush start time
+        let flush_start_time = Instant::now();
 
         let batch = {
             let mut agg = self.aggregator.lock().map_err(|e| {
@@ -230,6 +228,20 @@ impl PipelineTrait for Pipeline<'_> {
 
         // Write the batch using the delta_io interface
         self.delta_io.write_batch(arrow_batch, write_mode).await?;
+
+        // Record flush end time
+        let flush_end_time = Instant::now();
+
+        // Record flush duration in seconds
+        let flush_duration = flush_end_time
+            .duration_since(flush_start_time)
+            .as_secs_f64();
+
+        // Record the number of messages written to Delta
+        if let Some(monitoring) = self.monitoring {
+            monitoring.record_delta_write(batch.len() as u64);
+            monitoring.observe_delta_flush_time(flush_duration);
+        }
 
         Ok(())
     }

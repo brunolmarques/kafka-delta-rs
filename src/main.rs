@@ -55,6 +55,6 @@ async fn run() -> Result<(), AppError> {
     log::info!("Starting Kafka consumer...");
     // The application will keep running until an error occurs or it's interrupted
     consumer.run().await?;
-    
+
     Ok(())
 }

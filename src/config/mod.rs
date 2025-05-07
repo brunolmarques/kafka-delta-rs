@@ -26,7 +26,7 @@ pub struct KafkaConfig {
     pub timeout: Option<u64>, // Optional: timeout for Kafka operations, default is 5000ms
 }
 
-#[allow(dead_code)] // TODO: remove 
+#[allow(dead_code)] // TODO: remove
 #[derive(Debug, Deserialize)]
 pub struct DeltaConfig {
     /// Path to the Delta table
